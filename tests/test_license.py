@@ -18,12 +18,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 class LicenseTest(unittest.TestCase):
     def test_license_file_is_agpl3(self):
-        text = io.open(os.path.join(ROOT, "LICENSE"), encoding="utf-8").read()
+        with io.open(os.path.join(ROOT, "LICENSE"), encoding="utf-8") as fh:
+            text = fh.read()
         self.assertIn("GNU AFFERO GENERAL PUBLIC LICENSE", text)
         self.assertIn("Version 3, 19 November 2007", text)
 
     def test_pyproject_declares_the_same_license(self):
-        text = io.open(os.path.join(ROOT, "pyproject.toml"), encoding="utf-8").read()
+        with io.open(os.path.join(ROOT, "pyproject.toml"), encoding="utf-8") as fh:
+            text = fh.read()
         self.assertIn('license = { text = "%s" }' % config.LICENSE_ID, text)
         self.assertIn("AGPLv3+", text, "缺少 OSI 分类器，PyPI 上会显示成未知许可证")
 
@@ -44,7 +46,8 @@ class LicenseTest(unittest.TestCase):
                 if not name.endswith(".py"):
                     continue
                 path = os.path.join(base, name)
-                head = io.open(path, encoding="utf-8").read(400)
+                with io.open(path, encoding="utf-8") as fh:
+                    head = fh.read(400)
                 if needle not in head:
                     missing.append(os.path.relpath(path, ROOT))
         self.assertEqual(missing, [], "这些文件没有 SPDX 头：%s" % missing)

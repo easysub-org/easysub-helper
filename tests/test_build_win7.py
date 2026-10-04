@@ -189,7 +189,8 @@ class LauncherEntryTest(unittest.TestCase):
 
     def test_launcher_uses_a_static_import(self):
         # 用 ast 看**代码**（文档字符串里提到 `from . import cli` 是解释踩过的坑，不算）
-        tree = ast.parse(io.open(os.path.join(ROOT, bw.ENTRY), encoding="utf-8").read())
+        with io.open(os.path.join(ROOT, bw.ENTRY), encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
         imports = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
         self.assertIn("easysub_helper.cli", [n.module for n in imports])
         self.assertEqual([n.level for n in imports if n.level], [],

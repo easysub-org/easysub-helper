@@ -70,7 +70,8 @@ class NoHardcodedChineseTest(unittest.TestCase):
         offenders = []
         for path in _iter_sources():                    # 复用上面的遍历（已跳过 i18n.py）
             rel = os.path.relpath(path, package_root)
-            tree = ast.parse(io.open(path, encoding="utf-8").read())
+            with io.open(path, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read())
             skip = self._docstring_ids(tree)
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Constant) or not isinstance(node.value, str):

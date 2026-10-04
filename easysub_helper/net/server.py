@@ -610,6 +610,7 @@ class HelperServer(object):
         # 身份不同（is 比较不受 id 复用影响），绝不能把新会话误杀
         if session is not None and session is getattr(self, "_error_session", None):
             self._session = None
+        self._error_session = None          # 引用用完即放,别把旧会话(含 backend/线程)钉住
         self._emit_from_thread(("json", self._state_msg()))
 
     # ---------------- WebSocket ----------------
