@@ -1,0 +1,98 @@
+name: helper-ci
+
+# 这个工作流随 easysub-helper 独立成库时生效（在主仓库里该目录被 .gitignore 忽略）。
+# 目标：证明"老解释器也能跑"，以及为 Win7 档产出 py3.8 的可执行文件。
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (py${{ matrix.python }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.6", extras: "" }          # 最老档
+          - { os: ubuntu-latest, python: "3.7", extras: "" }
+          - { os: ubuntu-latest, python: "3.8", extras: "[capture]" } # Win7 同代解释器
+          - { os: ubuntu-latest, python: "3.12", extras: "[capture,quality]" }
+          - { os: windows-2019, python: "3.8", extras: "[capture]" }  # Win7 发布档
+          - { os: windows-2019, python: "3.12", extras: "[capture,quality]" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        shell: bash
+        run: |
+          python -m pip install --upgrade "pip<24" setuptools wheel
+          python -m pip install -e ".${{ matrix.extras }}"
+      - name: Unit tests（无需音频设备）
+        shell: bash
+        run: python -m unittest discover -s tests -t . -v
+      - name: CLI 冒烟
+        shell: bash
+        run: |
+          python -m easysub_helper --version
+          python -m easysub_helper --lang en pair || true
+          python -m easysub_helper devices --json | head -20 || true
+
+  package-macos:
+    name: package (macOS)
+    runs-on: macos-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Build onefile app
+        run: |
+          python -m pip install --upgrade pip setuptools wheel pyinstaller
+          # 刻意不带 `quality`：soxr 是 LGPL-2.1-or-later，塞进 PyInstaller 单文件会让
+          # "用户可替换该库"这条义务落空。重采样有内置 polyphase FIR 兜底，音质差别很小。
+          python -m pip install -e ".[capture]"
+          # macOS 图标用 assets/easysub.icns（同样来自插件 logo）；
+          # 想要系统音频免驱动，再加 extras: pysysaudio（macOS 14.2+）
+          # --windowed：默认入口是 tkinter 窗口，不能带控制台
+          pyinstaller --onefile --windowed --name easysub-helper \
+            --icon easysub_helper/assets/easysub.icns \
+            --add-data "easysub_helper/assets:easysub_helper/assets" \
+            easysub_helper/__main__.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: easysub-helper-macos
+          path: dist/easysub-helper
+
+  package-win7:
+    name: package (Win7 / py3.8)
+    runs-on: windows-2019
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.8" }
+      - name: Build onefile exe
+        shell: bash
+        run: |
+          python -m pip install --upgrade "pip<24" setuptools wheel pyinstaller
+          python -m pip install -e ".[capture]"
+          # 说明：助手不托管 Web 产物、也不碰模型，产物是自包含的（双击即弹窗口）。
+          # 这条用于验证 Win7 上能否启动；Linux 发行包要显式声明 python3-tk 依赖。
+          # 图标用插件 logo 生成的 easysub.ico（与扩展图标同源）；
+          # assets 必须显式 add-data：onefile 模式不会自动带上包内数据文件。
+          # --noconsole：Windows 上不弹黑框（默认入口是窗口）
+          pyinstaller --onefile --noconsole --name easysub-helper \
+            --icon easysub_helper/assets/easysub.ico \
+            --add-data "easysub_helper/assets;easysub_helper/assets" \
+            --hidden-import soundcard \
+            --collect-submodules soundcard \
+            easysub_helper/__main__.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: easysub-helper-win7-py38
+          path: dist/easysub-helper.exe

@@ -1,0 +1,6 @@
+# 最老档：Python 3.6（老 CI 镜像/老机器）。声音走 soundcard（纯 CFFI，>=3.5）。
+# soxr 新版要 3.9，这里不装——内置多相 FIR 重采样会自动接管。
+# 用法：python3.6 -m pip install -r requirements/py36.txt
+aiohttp>=3.8.6,<3.9
+numpy>=1.19.5,<1.20
+soundcard>=0.4.2

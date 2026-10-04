@@ -1,0 +1,17 @@
+# 本仓库（easysub-helper）长期会独立成库，这份忽略规则只针对自己。
+# 主仓库的 .gitignore 里已忽略整个 easysub-helper/（开发期原地进行）。
+
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+
+# 本机运行产物（模型缓存、自检 wav、token、冒烟测试临时目录）
+.smoke/
+models/
+*.wav
+*.log

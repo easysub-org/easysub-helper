@@ -1,0 +1,5 @@
+# Windows 7 发布档：Python 3.8.10（Win7 上最后一个可用版本）+ WASAPI loopback
+# 用法：py -3.8 -m pip install -r requirements/win7-py38.txt
+aiohttp>=3.8.6,<4
+numpy>=1.21,<2
+soundcard>=0.4.2

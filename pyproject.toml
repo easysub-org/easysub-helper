@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "easysub-helper"
+version = "0.1.0"
+description = "易字幕本机助手：用 OS API 采集本机音频，与浏览器配对后经本机 WebSocket 推送 16k PCM（只做采集与配对）"
+readme = "README.md"
+requires-python = ">=3.6"
+# PEP 639 的字符串写法（license = "AGPL-3.0-or-later"）要 setuptools >= 77，
+# 而我们为了兼容 Win7 上的老 Python（3.6/3.8）刻意用老 setuptools，所以保持 table 写法。
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "hcz1017" }]
+keywords = ["system-audio", "loopback", "wasapi", "pulseaudio", "screencapturekit", "easysub"]
+classifiers = [
+  "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+  "Programming Language :: Python :: 3.6",
+  "Programming Language :: Python :: 3.7",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+]
+# 版本策略（Win7 是硬约束，见 README「Windows 7」一节）：
+#   - 源码**只用 3.6 可解析的语法**（不用 `from __future__ import annotations`、不用 dataclass、
+#     不用海象运算符），这样在只有老解释器的构建机/GitHub Actions 上也能跑起来。
+#     用 tests/test_py36_compat.py 把关（ast feature_version=(3,6) + 禁用 API 扫描）。
+#   - Win7 上 Python 最后可用版本是 3.8.10（3.9 起官方不再支持 Win7），所以**发布 Win7 产物
+#     要用 3.8 构建**；3.6/3.7 构建用于兼容更老的机器与老 CI 镜像。
+#   - 依赖按 py 版本分档：aiohttp 3.9+ 需要 3.8；numpy 1.20 需要 3.7、numpy 1.25 需要 3.9。
+dependencies = [
+  "aiohttp>=3.8.6,<3.9 ; python_version < '3.8'",
+  "aiohttp>=3.8.6,<4 ; python_version >= '3.8'",
+  "numpy>=1.19.5,<1.20 ; python_version == '3.6'",
+  "numpy>=1.21,<1.22 ; python_version == '3.7'",
+  "numpy>=1.21,<2 ; python_version == '3.8'",
+  "numpy>=1.24 ; python_version >= '3.9'",
+]
+
+[project.optional-dependencies]
+# 采集后端：Windows(WASAPI loopback)/macOS(CoreAudio)/Linux(PulseAudio monitor)。
+# soundcard 的 Requires-Python 是 >=3.5，纯 CFFI，**不需要编译器**——这正是选它的原因
+# （pyaudiowpatch 那种需要 CPython 扩展的，在 py3.6/3.7 + Win7 上经常没有可用 wheel）。
+# Linux 上还有零依赖的 parec/pw-record 子进程后端，见 easysub_helper.audio。
+capture = ["soundcard>=0.4.2"]
+# 高质量重采样（带状态、任意比）。缺失时自动回落到内置多相 FIR，功能不受影响。
+# 注意：soxr 新版要求 py>=3.9，老解释器上装不上就直接跳过这个 extra。
+quality = ["soxr>=0.3.7"]
+dev = ["pytest>=7 ; python_version >= '3.7'"]
+
+[project.scripts]
+easysub-helper = "easysub_helper.cli:main"
+
+# 图形入口：**用户双击的那个**。Windows 上 gui-scripts 生成不带控制台窗口的启动器
+# （普通 scripts 会先弹一个黑框，看起来就不像桌面应用）；macOS 上生成 .app 里的可执行体。
+# 同一个 main：没有 tkinter（Linux 缺 python3-tk）时自动回落命令行，功能不缩水。
+[project.gui-scripts]
+easysub-helper-gui = "easysub_helper.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["easysub_helper*"]
+
+# 品牌资源（从插件 logo 生成，见 tools/make_icons.py）必须随包走：
+# 助手窗口头部的 logo 与 Windows/macOS 可执行文件图标都靠它们（窗口只用标准库解码 PNG）。
+[tool.setuptools.package-data]
+easysub_helper = ["assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[project.urls]
+Source = "https://github.com/easysub-org/easysub-helper"
+License = "https://www.gnu.org/licenses/agpl-3.0.html"
