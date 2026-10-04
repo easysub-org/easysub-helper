@@ -1,12 +1,21 @@
 name: helper-ci
 
 # 这个工作流随 easysub-helper 独立成库时生效（在主仓库里该目录被 .gitignore 忽略）。
-# 目标：证明"老解释器也能跑"，以及为 Win7 档产出 py3.8 的可执行文件。
+# 目标：① 证明"老解释器也能跑"；② 为三个平台产出可执行文件；③ 填版本号就自动发 Release。
+#
+# 体验与主仓库的 Build 工作流一致：
+#   push / PR        → 跑测试 + 三个平台的产物作为 artifact 上传
+#   workflow_dispatch（填版本号）→ 额外创建 GitHub Release（softprops/action-gh-release）
 on:
   push:
     branches: ["**"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号（不加 v，留空仅构建）'
+        required: false
+        type: string
 
 # 同一分支的旧运行没意义了，直接取消（省 runner 分钟，也让状态更快收敛）
 concurrency:
@@ -31,7 +40,6 @@ jobs:
           #      才有的 API（dataclass / asyncio.run / capture_output= / removeprefix / 海象 …），
           #      每个 job 都会跑，所以 3.6 兼容性并没有失去覆盖；
           #   2) py3.8 是"最后一个支持 Win7 的 CPython"，也正是发布档用的解释器。
-          # 想在真 3.6 解释器里跑完整套件的话，只能自建 runner 或本地用 pyenv —— 托管 runner 做不到。
           - { os: ubuntu-22.04, python: "3.8", extras: "[capture]" }   # Win7 同代解释器
           - { os: ubuntu-latest, python: "3.12", extras: "[capture,quality]" }
           - { os: windows-2022, python: "3.8", extras: "[capture]" }   # Win7 发布档
@@ -58,6 +66,45 @@ jobs:
           python -m easysub_helper --help
           python -c "import easysub_helper, easysub_helper.gui, easysub_helper.net, easysub_helper.audio; print('imports ok')"
 
+  package-linux:
+    name: package (Linux x64)
+    # 刻意用 22.04 而不是 latest：PyInstaller 产物只能在**同代或更新**的 glibc 上运行，
+    # 在更老的发行版上构建 = 能装的机器更多（22.04 = glibc 2.35，24.04 = 2.39）。
+    runs-on: ubuntu-22.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip setuptools wheel pyinstaller
+          python -m pip install -e ".[capture]"
+      - name: Build onefile binary
+        run: |
+          # 入口必须是 launcher.py（静态导入）；用 easysub_helper/__main__.py 时 PyInstaller
+          # 看不到 `from . import cli`，包里会没有 easysub_helper 包，一跑就 ModuleNotFoundError。
+          # --collect-submodules：后端选择/设备枚举有些是运行期才 import 的，静态分析容易漏。
+          pyinstaller --onefile --name easysub-helper \
+            --collect-submodules easysub_helper \
+            --add-data "easysub_helper/assets:easysub_helper/assets" \
+            launcher.py
+      - name: 冒烟（真跑冻结产物；不弹窗）
+        run: |
+          ./dist/easysub-helper --version
+          ./dist/easysub-helper --help > /dev/null
+          # 再起一遍服务并问它要配对信息：证明 aiohttp / 服务端代码真的进包了
+          PORT=$(python -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
+          ./dist/easysub-helper --no-gui --port "$PORT" --lang en &
+          APP=$!
+          sleep 3
+          curl -fsS "http://127.0.0.1:$PORT/api/pair/info" | grep -q '"app": "easysub-helper"'
+          kill $APP
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-linux
+          path: dist/easysub-helper
+
   package-macos:
     name: package (macOS)
     runs-on: macos-latest
@@ -76,12 +123,15 @@ jobs:
           # 想要系统音频免驱动，再加 extras: pysysaudio（macOS 14.2+）
           # --windowed：默认入口是 tkinter 窗口，不能带控制台
           pyinstaller --onefile --windowed --name easysub-helper \
+            --collect-submodules easysub_helper \
             --icon easysub_helper/assets/easysub.icns \
             --add-data "easysub_helper/assets:easysub_helper/assets" \
-            easysub_helper/__main__.py
+            launcher.py
+      - name: 冒烟（真跑冻结产物）
+        run: ./dist/easysub-helper --version
       - uses: actions/upload-artifact@v4
         with:
-          name: easysub-helper-macos
+          name: helper-macos
           path: dist/easysub-helper
 
   package-win7:
@@ -101,14 +151,101 @@ jobs:
           # 仍把 Win7 当受支持平台的 5.13.2，少一个变量。
           python -m pip install "pyinstaller==5.13.2"
           python -m pip install -e ".[capture]"
-          # 打包脚本负责：① 把 UCRT（api-ms-win-crt-*.dll + ucrtbase.dll）打进 onefile
-          #（Win7 SP1 未打补丁时系统里没有它们，用户会看到 api-ms-win-crt-runtime 缺失）；
-          # ② 打完后校验这些 DLL 真的在归档里，缺了就红 —— 我们没有 Win7 真机，
+          # 打包脚本负责：① 用静态入口 launcher.py；② 把 UCRT（api-ms-win-crt-*.dll +
+          # ucrtbase.dll）打进 onefile（Win7 SP1 未打补丁时系统里没有它们）；
+          # ③ 打完后校验这些 DLL 真的在归档里，缺了就红 —— 我们没有 Win7 真机，
           #    绝不允许 CI"绿着产出一个在 Win7 上起不来的包"。
-          # 说明：助手不托管 Web 产物、也不碰模型，产物是自包含的（双击即弹窗口）。
           # 在 Server 2022 上构建的产物**仍需在 Win7 真机验证一次**（见 README 的诚实标注）。
           python tools/build_win7_exe.py
+      - name: 冒烟（真跑冻结产物）
+        shell: bash
+        run: ./dist/easysub-helper.exe --version
       - uses: actions/upload-artifact@v4
         with:
-          name: easysub-helper-win7-py38
+          name: helper-win7
           path: dist/easysub-helper.exe
+
+  release:
+    name: release v${{ github.event.inputs.version }}
+    # 与主仓库一致：只有手动触发并填了版本号才发 Release；平时 push/PR 只出 artifact
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+    needs: [package-linux, package-macos, package-win7]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4          # 打包发行资产要带上 LICENSE / README
+      - uses: actions/download-artifact@v4
+        with: { name: helper-linux, path: dist-linux }
+      - uses: actions/download-artifact@v4
+        with: { name: helper-macos, path: dist-macos }
+      - uses: actions/download-artifact@v4
+        with: { name: helper-win7, path: dist-win7 }
+
+      - name: 整理发行资产
+        run: |
+          set -euo pipefail
+          V="${{ github.event.inputs.version }}"
+          mkdir -p release-assets
+          chmod +x dist-linux/easysub-helper dist-macos/easysub-helper
+
+          for plat in linux macos; do
+            stage="stage-$plat"
+            mkdir -p "$stage"
+            cp "dist-$plat/easysub-helper" "$stage/easysub-helper"
+            chmod +x "$stage/easysub-helper"
+            # AGPL 分发要随附许可证：把 LICENSE 与 README 一起塞进压缩包
+            cp LICENSE README.md "$stage/"
+            if [ "$plat" = "linux" ]; then
+              tar -czf "release-assets/easysub-helper-v$V-linux-x64.tar.gz" -C "$stage" .
+            else
+              (cd "$stage" && zip -qr "../release-assets/easysub-helper-v$V-macos.zip" .)
+            fi
+          done
+
+          stage="stage-win"
+          mkdir -p "$stage"
+          cp dist-win7/easysub-helper.exe "$stage/"
+          cp LICENSE README.md "$stage/"
+          (cd "$stage" && zip -qr "../release-assets/easysub-helper-v$V-windows-x64.zip" .)
+          # 再给 Win7 用户一个"裸 exe"，双击就能用，不用先解压
+          cp dist-win7/easysub-helper.exe "release-assets/easysub-helper-v$V-windows-x64.exe"
+
+          ls -lh release-assets
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          name: v${{ github.event.inputs.version }}
+          body: |
+            ## EasySub 本机助手 v${{ github.event.inputs.version }}
+
+            配合浏览器扩展 / Web 版使用的**原生音频插件**，只做两件事：**采集本机音频 + 与页面配对**。
+            Firefox 的 `getDisplayMedia` 至今不支持音频（[bug 1541425](https://bugzilla.mozilla.org/show_bug.cgi?id=1541425)），
+            系统音频只能由本机进程采 —— 这个助手就是干这个的。
+
+            ### 下载
+
+            | 平台 | 文件 | 前提 |
+            |---|---|---|
+            | Windows x64 | `...-windows-x64.zip`（或裸 `.exe`，双击即用） | **Win7 SP1** 起；UCRT 已内置；⚠️ Win7 档**未在真机实测** |
+            | macOS | `...-macos.zip` | macOS 14.2+ 免驱动抓系统音频；更早版本需自装虚拟声卡（BlackHole） |
+            | Linux x64 | `...-linux-x64.tar.gz` | 需要桌面环境（X11）；glibc ≥ 2.35（在 Ubuntu 22.04 上构建） |
+
+            ### 用法（三步）
+
+            1. 打开助手窗口 → 选**音源**（系统音频 / 麦克风，麦克风还能选具体设备）→ 点**「启动」**
+               （默认是暂停的：不点启动，助手不会打开任何音频设备）;
+            2. 在页面里选「从桌面助手获取音频」→ 点开始 → 把窗口里的 **6 位配对码**填进去（只需一次）;
+            3. 窗口里的**电平图**就是"真的在采"的证据 —— 不需要配对也能先测。
+
+            ### 说明
+
+            - 助手**不托管页面、不碰模型、不联网**：只监听 `127.0.0.1`，页面自带 wasm 识别引擎。
+            - 许可证 **AGPL-3.0-or-later**；对应源码在本仓库，压缩包里也附了 `LICENSE`。
+            - 平台差异：Linux 走 `parec`/`pw-record`（PulseAudio/PipeWire）；Windows 走 WASAPI loopback；
+              macOS 走 `pysysaudio`（14.2+）或虚拟声卡。
+            - 排障：先看窗口里的电平图与日志区；`--version` / `--help` 可确认产物能跑。
+          files: release-assets/*
+          draft: false
