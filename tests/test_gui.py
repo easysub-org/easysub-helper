@@ -189,6 +189,9 @@ class WindowCase(unittest.TestCase):
         self.pairing = self.server.pairing
         self.code = self.pairing.new_code()
         self.window = self.WINDOW_CLASS(self.server, self.pairing)
+        # **跑测试时不要在用户屏幕上弹真窗口**：在第一次 update（= 映射）之前 withdraw，
+        # 窗口根本不会被映射出来。因此下面的断言一律不许依赖"已映射"（见 grid_info 那几处）。
+        self.window.root.withdraw()
         self.window.root.update()
 
     def tearDown(self):
@@ -316,7 +319,9 @@ class WindowTest(WindowCase):
         self._stub_snapshot(capturing=True, paused=False, userOn=True, levelRms=0.3,
                             levelPeak=0.6, levelAt=time.monotonic())
         canvas = self.window.level_canvas
-        canvas.configure(width=400)
+        # 显式给尺寸，再用**请求尺寸**断言：测试跑在 withdraw 过的窗口上（不弹窗），
+        # winfo_width() 恒为 1，不能用；而 _draw_level 在这种情形下正是按请求尺寸作画的。
+        canvas.configure(width=400, height=120)
         self.window._refresh()
         self.window.root.update_idletasks()
         items = canvas.find_all()
@@ -324,9 +329,9 @@ class WindowTest(WindowCase):
         x0, y0, x1, y1 = canvas.bbox("all")
         # 横向允许 Tk 给线段算出的 ±2px 边界，纵向一格都不许溢出（溢出的刻度文字会被裁掉）
         self.assertGreaterEqual(x0, -3)
-        self.assertLessEqual(x1, canvas.winfo_width() + 3)
+        self.assertLessEqual(x1, canvas.winfo_reqwidth() + 3)
         self.assertGreaterEqual(y0, 0)
-        self.assertLessEqual(y1, canvas.winfo_height())
+        self.assertLessEqual(y1, canvas.winfo_reqheight())
 
     # ---- 设备下拉（只服务坐在本机的人；页面不需要选设备）----
     def test_device_list_is_filled_from_enumeration(self):
@@ -357,14 +362,16 @@ class WindowTest(WindowCase):
         self.window.source_box.current(0)          # 系统音频
         self.window._sync_device_picker("system")
         self.window.root.update_idletasks()
-        self.assertFalse(self.window.device_box.winfo_ismapped())
-        self.assertFalse(self.window.device_field_label.winfo_ismapped())
+        # grid_remove() 之后 grid_info() 为空 —— 这比 winfo_ismapped() 更贴切：
+        # 测试窗口是 withdraw 过的，"是否被布局管理"才是我们真正要断言的。
+        self.assertEqual(self.window.device_box.grid_info(), {})
+        self.assertEqual(self.window.device_field_label.grid_info(), {})
 
         self.window.source_box.current(1)          # 麦克风
         self.window._sync_device_picker("mic")
         self.window.root.update_idletasks()
-        self.assertTrue(self.window.device_box.winfo_ismapped())
-        self.assertTrue(self.window.device_field_label.winfo_ismapped())
+        self.assertNotEqual(self.window.device_box.grid_info(), {})
+        self.assertNotEqual(self.window.device_field_label.grid_info(), {})
 
     def test_backend_line_shows_the_device_the_backend_actually_opened(self):
         """状态行要显示后端**实际打开**的设备：切换到底生没生效，用户一眼能看出来。"""

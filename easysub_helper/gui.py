@@ -587,8 +587,11 @@ class HelperWindow(object):
         canvas = self.level_canvas
         width = int(canvas.winfo_width())
         height = int(canvas.winfo_height())
-        if width <= 1 or height <= 1:      # 还没布局出来
-            return
+        if width <= 1 or height <= 1:
+            # 还没布局出来（窗口刚建好、尚未映射）：退回**请求尺寸**，别把首帧画成 1px 宽，
+            # 也别干脆不画 —— 100ms 后会用真实尺寸重画，用户看不到这一帧。
+            width = max(int(canvas.winfo_reqwidth()), 1)
+            height = max(int(canvas.winfo_reqheight()), 1)
         canvas.delete("all")
         capturing = bool(self._capturing) and not self._paused
         # 从下往上排版：留出 dB 刻度文字的高度，波形区吃剩下的空间（不让任何图元被裁掉）
