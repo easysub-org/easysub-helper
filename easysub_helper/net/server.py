@@ -592,7 +592,8 @@ class HelperServer(object):
         LOG.warning(t("log.captureFailed", error=exc))
         self.last_error = str(exc)
         session = self._session
-        self._error_session_id = id(session) if session is not None else None
+        # 存**对象引用**而不是 id()：旧会话若在排队窗口内被 GC，新会话可能复用同一 id()
+        self._error_session = session
         loop = self._loop
         if loop is None or loop.is_closed():
             self._session = None            # 循环没了：只能就地收尾（进程多半在退出）
@@ -605,9 +606,9 @@ class HelperServer(object):
         # 这里执行时用户可能已经重新 start_capture 出了**新会话**（排队期间点开始），
         # 只清"还是出错的那个"——拿 session 生成序号对比，别把新会话误杀
         session = self._session
-        # 只清"出错的那个会话"：如果排队期间用户已经 start_capture 出了新会话
-        # （对象不同 → id 不同），绝不能把新会话误杀
-        if session is not None and id(session) == getattr(self, "_error_session_id", None):
+        # 只清"出错的那个会话"：如果排队期间用户已经 start_capture 出了新会话，
+        # 身份不同（is 比较不受 id 复用影响），绝不能把新会话误杀
+        if session is not None and session is getattr(self, "_error_session", None):
             self._session = None
         self._emit_from_thread(("json", self._state_msg()))
 

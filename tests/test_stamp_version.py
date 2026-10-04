@@ -45,7 +45,20 @@ class StampInTest(unittest.TestCase):
             stamp_version.stamp_in(os.path.join(self.root, "nope"), "1.8.0")
 
     def test_main_rejects_non_numeric_input(self):
-        self.assertEqual(stamp_version.main(["stamp_version.py", "beta"]), 2)
+        # 拒绝矩阵：非三段 / 多余参数 / 空参
+        self.assertEqual(stamp_version.main(["s.py", "beta"]), 2)
+        self.assertEqual(stamp_version.main(["s.py", "1.2"]), 2)
+        self.assertEqual(stamp_version.main(["s.py", "1.2.3.4"]), 2)
+        self.assertEqual(stamp_version.main(["s.py", "1.8.0", "extra"]), 2)
+        self.assertEqual(stamp_version.main(["s.py"]), 2)
+
+    def test_main_success_path_stamps_files(self):
+        """成功路径的回归网：第一版 main() 在成功路径上 NameError，测试全绿照样发不出版
+        （拒绝路径提前 return，把它绕过去了）。root 注入口让这条可以对着临时仓库真跑。"""
+        code = stamp_version.main(["stamp_version.py", "1.8.0"], root=self.root)
+        self.assertEqual(code, 0)
+        self.assertIn('__version__ = "1.8.0"', self._read("easysub_helper/__init__.py"))
+        self.assertIn('version = "1.8.0"', self._read("pyproject.toml"))
 
 
 if __name__ == "__main__":
