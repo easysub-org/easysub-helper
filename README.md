@@ -243,6 +243,18 @@ EASYSUB_HELPER_AUDIO_TESTS=1 .venv/bin/python -m unittest tests.test_server -v  
 `tests/test_scope.py` 是"范围闸门"：助手只做采集 + 配对，谁把静态托管、模型目录、设备列举、
 HTML 配对页写回来，它就会红。
 
+## 贡献
+
+欢迎 issue 与 PR。**提代码 PR 前请先签 [CLA](CLA.md)**：在你的 PR 里发一条评论，内容照抄
+
+> I have read the CLA Document and I hereby sign the CLA.
+
+即可 —— 你**保留**自己贡献的版权，项目所有者获得"可按任意许可证（含商业许可）再许可"的权利
+（`cla` 工作流会自动打标签）。其余约定见 [CONTRIBUTING.md](CONTRIBUTING.md)：本地测试命令、
+领域边界（助手只做采集 + 配对，`tests/test_scope.py` 是机械闸门）、Python 3.6 语法与 i18n 要求。
+
+安全问题请走 GitHub 的 **Security → Report a vulnerability**，不要开公开 issue。
+
 ## 路线图
 
 - [x] 采集三平台 + 定长 16k 出块（带状态重采样）
