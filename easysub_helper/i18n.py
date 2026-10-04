@@ -196,7 +196,7 @@ _STRINGS = {
         "run.banner.port": "Port     : {port}",
         "run.banner.source": "Source   : {source} (backend {backend})",
         "run.banner.pairCode": "Pair code: {code}   (valid for {ttl} minutes; type it in the page to pair)",
-        "run.banner.pairHint": "the \"get audio from desktop helper\" source only appears after pairing",
+        "run.banner.pairHint": "pick \"get audio from desktop helper\" in the page, then type this code there",
         "run.banner.debugToken": "[debug] a fixed --token was given, pair-code verification is skipped",
         "run.banner.stop": "Quit     : Ctrl+C",
         "run.err.hostNotLoopback": "ERROR: --host {host} is not a loopback address. This service hands local audio to any page\n       that connects; exposing it on the LAN publishes your audio stream. If you really need\n       this, pass --allow-lan explicitly (at your own risk).",
