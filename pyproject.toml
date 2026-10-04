@@ -1,4 +1,6 @@
 [build-system]
+# PEP 621 元数据需要 setuptools>=61（py3.7+）：真 3.6 环境 `pip install -e .` 会失败，
+# 源码本身 3.6-clean（可运行）；Win7 主目标 3.8 不受影响。README 措辞已同步。
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 

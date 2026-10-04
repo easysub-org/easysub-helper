@@ -722,7 +722,6 @@ class HelperWindow(object):
         self.device_field_label.configure(text=t("gui.deviceLabel"))
         self.level_field_label.configure(text=t("gui.levelLabel"))
         self.quit_button.configure(text=t("gui.quit"))
-        self.keep_open_label.configure(text=t("gui.keepOpen"))
         self.pair_frame.configure(text=t("gui.pairTitle"))
         self.pair_hint.configure(text=t("gui.pairHint"))
         self.copy_button.configure(text=t("gui.pairCopy"))

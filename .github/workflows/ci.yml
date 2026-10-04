@@ -57,6 +57,11 @@ jobs:
       - name: Unit tests（无需音频设备）
         shell: bash
         run: python -m unittest discover -s tests -t . -v
+      - name: GUI 测试（xvfb 虚拟显示；916 行的窗口代码不该在 CI 全跳过）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+          xvfb-run -a env EASYSUB_HELPER_GUI_TESTS=1 python -m unittest tests.test_gui -v
       - name: 冒烟（只跑真实存在的入口）
         shell: bash
         run: |
@@ -78,7 +83,10 @@ jobs:
         with: { python-version: "3.12" }
       - name: Install
         run: |
-          python -m pip install --upgrade pip setuptools wheel pyinstaller
+          python -m pip install --upgrade pip setuptools wheel
+          # macOS 的 onefile+windowed 在 PyInstaller 6.x 已弃用（v7 会报错），先钉在 6.x；
+          # 真要迁 onedir/.app 需要一并改产物路径与冒烟（见 README「未实测」清单）。
+          python -m pip install "pyinstaller>=6.0,<7"
           python -m pip install -e ".[capture]"
       - name: Build onefile binary
         run: |
@@ -113,6 +121,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
+      - name: 把 Release 版本号打进源码（__version__ / pyproject）
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+        run: python tools/stamp_version.py "${{ github.event.inputs.version }}"
       - name: Build onefile app
         run: |
           python -m pip install --upgrade pip setuptools wheel pyinstaller
@@ -127,8 +138,15 @@ jobs:
             --icon easysub_helper/assets/easysub.icns \
             --add-data "easysub_helper/assets:easysub_helper/assets" \
             launcher.py
-      - name: 冒烟（真跑冻结产物）
-        run: ./dist/easysub-helper --version
+      - name: 冒烟（真跑冻结产物：版本 + 起服务）
+        run: |
+          ./dist/easysub-helper --version
+          PORT=$(python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
+          ./dist/easysub-helper --no-gui --port "$PORT" --lang en &
+          APP=$!
+          sleep 3
+          curl -fsS "http://127.0.0.1:$PORT/api/pair/info" | grep -q '"app": "easysub-helper"'
+          kill $APP
       - uses: actions/upload-artifact@v4
         with:
           name: helper-macos
@@ -157,9 +175,16 @@ jobs:
           #    绝不允许 CI"绿着产出一个在 Win7 上起不来的包"。
           # 在 Server 2022 上构建的产物**仍需在 Win7 真机验证一次**（见 README 的诚实标注）。
           python tools/build_win7_exe.py
-      - name: 冒烟（真跑冻结产物）
+      - name: 冒烟（真跑冻结产物：版本 + 起服务）
         shell: bash
-        run: ./dist/easysub-helper.exe --version
+        run: |
+          ./dist/easysub-helper.exe --version
+          PORT=$(python -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
+          ./dist/easysub-helper.exe --no-gui --port "$PORT" --lang en &
+          APP=$!
+          sleep 3
+          curl -fsS "http://127.0.0.1:$PORT/api/pair/info" | grep -q '"app": "easysub-helper"'
+          kill $APP
       - uses: actions/upload-artifact@v4
         with:
           name: helper-win7
@@ -229,8 +254,8 @@ jobs:
 
             | 平台 | 文件 | 前提 |
             |---|---|---|
-            | Windows x64 | `...-windows-x64.zip`（或裸 `.exe`，双击即用） | **Win7 SP1** 起；UCRT 已内置；⚠️ Win7 档**未在真机实测** |
-            | macOS | `...-macos.zip` | macOS 14.2+ 免驱动抓系统音频；更早版本需自装虚拟声卡（BlackHole） |
+            | Windows x64 | `...-windows-x64.zip`（或裸 `.exe`，双击即用） | **Win7 SP1** 起；UCRT 已内置；⚠️ Win7 档**未在真机实测**；产物**未签名**，SmartScreen 首次会拦（选"仍要运行"） |
+            | macOS | `...-macos.zip` | **系统音频需自装虚拟声卡（BlackHole）**——官方产物未内置 pysysaudio；麦克风即插即用 |
             | Linux x64 | `...-linux-x64.tar.gz` | 需要桌面环境（X11）；glibc ≥ 2.35（在 Ubuntu 22.04 上构建） |
 
             ### 用法（三步）

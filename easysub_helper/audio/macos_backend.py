@@ -120,7 +120,9 @@ class MacSystemBackend(AudioBackend):
             inner.open()
         except BackendError as exc:
             if self._fallback_error is not None and self.source == "system":
-                raise BackendError(t("audio.err.macNoSystemAudio"))
+                # 两层原因都带上：用户要能分清"没装 pysysaudio/没授权"还是"没装 BlackHole"
+                raise BackendError(t("audio.err.macNoSystemAudioDetail",
+                                     detail=self._fallback_error, detail2=exc))
             raise exc
         self._adopt(inner)
 

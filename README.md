@@ -163,7 +163,7 @@ GET  /ws?token=…               WebSocket 音频通道
 |---|---|---|---|
 | **Windows**（含 **Win7**） | `soundcard` | WASAPI loopback（整机混音）。**不需要虚拟声卡**，[loopback 不依赖硬件是否带 loopback 设备](https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording) | 无弹窗 |
 | **Linux** | `parec` / `pw-record`（子进程，零 Python 依赖），回落到 `soundcard` | PulseAudio/PipeWire 的 monitor 源（`@DEFAULT_MONITOR@`） | 无 |
-| **macOS 14.2+** | `mac-system`：先试 **pysysaudio** | ScreenCaptureKit / Core Audio process tap，**免驱动、不用 BlackHole** | 「屏幕与系统音频录制」授权一次 |
+| **macOS 14.2+** | `mac-system`：先试 **pysysaudio**（**需自装该库，官方产物未内置**） | ScreenCaptureKit / Core Audio process tap，免驱动、不用 BlackHole | 「屏幕与系统音频录制」授权一次 |
 | **macOS < 14.2** | `mac-system` 回落 `soundcard` | 需要 BlackHole 这类 loopback 输入设备 | 同左 |
 
 ### Python 库选型（2026-10 实测调研）
@@ -306,7 +306,7 @@ HTML 配对页写回来，它就会红。
 - [x] 页面里「桌面助手」音源**常驻显示**，配对成功才能启动（四态提示语）
 - [x] 主项目接线（探测 → 配对 → `从桌面助手获取音频` 音源，扩展与 Web 两条宿主）
 - [ ] macOS 按 App 抓（catap）、Windows 按进程抓（`AUDIOClient` process loopback）
-- [ ] PyInstaller 打包（Win7 档 = py3.8；`--windowed --icon`；Linux 需显式依赖 python3-tk）
+- [x] PyInstaller 打包（Win7 档 = py3.8 + UCRT 自校验；三平台 CI 产物 + 手动填版本号发 Release）
 
 ## 许可证
 

@@ -281,6 +281,47 @@ class HttpTest(ServerCase):
 
         self.with_server(allowed, allow_no_origin=True)
 
+    def test_pair_label_must_be_a_string(self):
+        """label 传非字符串不能 500（无令牌端点，任何人都能发）；list 也不许原样回显。
+
+        （独立审查发现：`[:80]` 对 int/bool 会 TypeError → 500；对 list 会原样回显。）
+        """
+        async def body(session):
+            for label in (123, True, ["a"], {"a": 1}, None):
+                async with session.post(self.base + "/api/pair",
+                                        json={"code": self.code, "label": label},
+                                        headers={"Origin": self.origin}) as resp:
+                    self.assertEqual(resp.status, 200, "label=%r" % (label,))
+                    data = await resp.json()
+                    self.assertIsInstance(data["label"], str)
+            # 字符串要清洗：压成一行 + 截断到 80
+            async with session.post(self.base + "/api/pair",
+                                    json={"code": self.code, "label": "  a\n b  " + "x" * 200},
+                                    headers={"Origin": self.origin}) as resp:
+                expected = ("a b " + "x" * 200)[:80]      # 压一行(已去首尾空白)后截断到 80
+                self.assertEqual((await resp.json())["label"], expected)
+
+        self.with_server(body)
+
+    def test_pair_label_must_be_a_string_on_fixed_token_path(self):
+        """--token 调试路径同样不许被 label 类型打挂（以前是 500 全灭）。"""
+        async def body(session):
+            async with session.post(self.base + "/api/pair", json={"label": 123},
+                                    headers={"Origin": self.origin}) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertEqual((await resp.json())["label"], "debug")
+
+        self.with_server(body, fixed_token="debug-token")
+
+    def test_port_zero_reports_the_bound_port(self):
+        """--port 0 时横幅/快照不许谎报 0：要回读真实绑定端口。"""
+        async def body(session):
+            self.assertGreater(self.server.port, 0, "应回读真实绑定端口")
+            async with session.get(self.server.base_url + "/api/pair/info") as resp:
+                self.assertEqual(resp.status, 200)
+
+        self.with_server(body, port=0, scan_ports=False)
+
     def test_non_ascii_pair_code_is_bad_code_and_counts_toward_lockout(self):
         """非 ASCII 配对码以前会 500 且**不计入限速**（compare_digest 抛 TypeError）→ 现在必须是干净的 bad_code。"""
         async def body(session):

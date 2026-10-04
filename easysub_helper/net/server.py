@@ -58,6 +58,19 @@ def _running_loop():
     return asyncio.get_event_loop()
 
 
+def _clean_label(value, default):
+    """把配对请求里的 `label` 收拾成一行短字符串。
+
+    为什么要专门做（独立审查发现）：`(body.get("label") or "...")[:80]` 对 `123` / `true`
+    这类 JSON 值会 TypeError → `/api/pair` 500（无令牌端点，任何人都能发）；对 list 还会
+    原样回显。非字符串一律丢弃用默认值，字符串压成一行并截断。
+    """
+    if not isinstance(value, str):
+        return default
+    text = " ".join(value.split())
+    return text[:80] or default
+
+
 class HelperServer(object):
     def __init__(self, pairing, port, host=config.DEFAULT_HOST,
                  default_source="system", backend="auto", device=None,
@@ -144,7 +157,11 @@ class HelperServer(object):
                 last_err = exc
                 continue
             self.port = candidate
-            self._site = site
+            # --port 0 时这里拿到的是请求值 0；真实绑定端口要从 site 上回读，
+            # 否则横幅/快照/base_url 都会说谎（说自己在 0 端口）
+            bound = getattr(site, "_bound_port", None) or getattr(site, "port", None)
+            if isinstance(bound, int) and bound > 0 and candidate == 0:
+                self.port = bound
             self.started_at = time.monotonic()
             LOG.info(t("log.listening", url=self.base_url))
             return candidate
@@ -301,7 +318,7 @@ class HelperServer(object):
         if self.fixed_token:
             # 调试模式：不校验配对码，直接回固定令牌（--token 的本意）
             return self._json(request, {"ok": True, "token": self.fixed_token,
-                                        "label": (body.get("label") or "debug")[:80]})
+                                        "label": _clean_label(body.get("label"), "debug")})
         ok, reason = self.pairing.verify(body.get("code"))
         if not ok:
             LOG.warning(t("log.pairFailed", reason=reason, origin=request.headers.get("Origin")))
@@ -311,7 +328,7 @@ class HelperServer(object):
                 "code": reason,
                 "message": self.pairing.error_message(reason),
             }, status=status)
-        label = (body.get("label") or "browser")[:80]
+        label = _clean_label(body.get("label"), "browser")
         token = self.pairing.issue_token(label)
         LOG.info(t("log.pairOk", label=label, devices=self.pairing.state().get("devices", 0)))
         return self._json(request, {"ok": True, "token": token, "label": label})
@@ -548,14 +565,26 @@ class HelperServer(object):
         self._emit_from_thread(("json", protocol.level(info["rms"], info["peak"])))
 
     def _on_capture_error(self, exc):
+        # 这个回调跑在**采集线程**里：直接改 self._session 会与事件循环侧的 _detach_locked 并发。
+        # 先记日志，再把「上报错误 + 清会话」丢回事件循环执行（复用既有的跨线程桥）。
         LOG.warning(t("log.captureFailed", error=exc))
         self.last_error = str(exc)
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            self._session = None            # 循环没了：只能就地收尾（进程多半在退出）
+            return
+        loop.call_soon_threadsafe(self._finish_capture_error_on_loop, exc)
+
+    def _finish_capture_error_on_loop(self, exc):
         self._emit_from_thread(("json", protocol.error(
             protocol.ERR_CAPTURE_FAILED, t("server.err.captureAborted", detail=str(exc)), True)))
         self._session = None
         self._emit_from_thread(("json", self._state_msg()))
 
     # ---------------- WebSocket ----------------
+    #: 同一时刻允许的 WS 连接数上限（每个连接一条 6 秒发送队列；防单页面开几百条）
+    WS_MAX_CONNECTIONS = 8
+
     async def handle_ws(self, request):
         token = self._token_from_request(request)
         origin = request.headers.get("Origin")
@@ -565,6 +594,11 @@ class HelperServer(object):
             LOG.warning(t("log.wsBadToken", origin=origin))
             return web.Response(status=403, text=t("server.err.notPaired"), charset="utf-8")
 
+        # 连接数上限：持令牌的页面理论上可以开任意多条连接（每条一条 6 秒发送队列）。
+        # 本机场景风险低，但上限便宜——超了给 503，别让一个失控页面吃满内存（独立审查建议）。
+        if len(self._queues) >= self.WS_MAX_CONNECTIONS:
+            LOG.warning(t("log.wsTooManyConnections", limit=self.WS_MAX_CONNECTIONS))
+            return web.Response(status=503, text=t("server.err.tooManyConnections"), charset="utf-8")
         ws = web.WebSocketResponse(heartbeat=30, max_msg_size=MAX_WS_MSG)
         await ws.prepare(request)
         queue = asyncio.Queue(maxsize=QUEUE_MAX)

@@ -90,6 +90,35 @@ class PolyphaseTest(unittest.TestCase):
         self.assertEqual(float(np.max(np.abs(y))), 0.0)
 
 
+class StreamStartTest(unittest.TestCase):
+    """流开头的行为：负下标被 clip 成 buf[0]（恰是前导零区）。
+
+    独立审查提醒：这个"恰好无差"依赖 buf 的布局——将来若有人改掉"开头即前导零"的前提，
+    clip 会把越界读变成重复读且**静默**。这里把当前行为钉住：同一信号"一次性喂"与"分小块喂"
+    的输出必须逐样本一致（含开头 23 个过渡样本），布局一旦变化这里先红。
+    """
+
+    def _signal(self, n=8000):
+        import math
+        return [math.sin(2 * math.pi * 220 * i / 48000.0) for i in range(n)]
+
+    def test_stream_start_is_block_invariant(self):
+        from easysub_helper.audio.resample import create_resampler
+        sig = self._signal()
+        whole = create_resampler(48000, 16000).process(np.asarray(sig, dtype=np.float32))
+
+        r = create_resampler(48000, 16000)
+        parts = []
+        for i in range(0, len(sig), 333):                      # 故意用不整除的块
+            parts.append(r.process(np.asarray(sig[i:i + 333], dtype=np.float32)))
+        chunked = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
+
+        self.assertEqual(whole.size, chunked.size)
+        # 全段一致（含开头的过渡样本），最大误差按 float32 精度容忍
+        diff = np.max(np.abs(whole - chunked)) if whole.size else 0.0
+        self.assertLess(float(diff), 1e-6, "开头样本不一致：clip 语义或缓冲布局变了")
+
+
 class SoxrTest(unittest.TestCase):
     def test_if_available(self):
         try:
