@@ -92,24 +92,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.8" }
-      - name: Build onefile exe
+      - name: Build onefile exe（带 UCRT，未打补丁的 Win7 也能起）
         shell: bash
         run: |
-          python -m pip install --upgrade "pip<24" setuptools wheel pyinstaller
+          python -m pip install --upgrade "pip<24" setuptools wheel
+          # PyInstaller 6.x 的官方支持矩阵只到 Windows 8+（其 README 原话："should work on
+          # Windows 7 or newer, but we only officially support Windows 8+"）；Win7 档固定在
+          # 仍把 Win7 当受支持平台的 5.13.2，少一个变量。
+          python -m pip install "pyinstaller==5.13.2"
           python -m pip install -e ".[capture]"
+          # 打包脚本负责：① 把 UCRT（api-ms-win-crt-*.dll + ucrtbase.dll）打进 onefile
+          #（Win7 SP1 未打补丁时系统里没有它们，用户会看到 api-ms-win-crt-runtime 缺失）；
+          # ② 打完后校验这些 DLL 真的在归档里，缺了就红 —— 我们没有 Win7 真机，
+          #    绝不允许 CI"绿着产出一个在 Win7 上起不来的包"。
           # 说明：助手不托管 Web 产物、也不碰模型，产物是自包含的（双击即弹窗口）。
-          # 这条用于验证 Win7 上能否启动；Linux 发行包要显式声明 python3-tk 依赖。
-          # 注意：这里在 Server 2022 上构建，产物**仍需在 Win7 真机验证一次**
-          # （PyInstaller 的 bootloader 可能用到 Win7 没有的新 API）。
-          # 图标用插件 logo 生成的 easysub.ico（与扩展图标同源）；
-          # assets 必须显式 add-data：onefile 模式不会自动带上包内数据文件。
-          # --noconsole：Windows 上不弹黑框（默认入口是窗口）
-          pyinstaller --onefile --noconsole --name easysub-helper \
-            --icon easysub_helper/assets/easysub.ico \
-            --add-data "easysub_helper/assets;easysub_helper/assets" \
-            --hidden-import soundcard \
-            --collect-submodules soundcard \
-            easysub_helper/__main__.py
+          # 在 Server 2022 上构建的产物**仍需在 Win7 真机验证一次**（见 README 的诚实标注）。
+          python tools/build_win7_exe.py
       - uses: actions/upload-artifact@v4
         with:
           name: easysub-helper-win7-py38

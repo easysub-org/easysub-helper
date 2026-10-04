@@ -175,18 +175,53 @@ GET  /ws?token=…               WebSocket 音频通道
 
 ## Windows 7 与 Python 版本
 
-- **Win7 上最后一个可用的 CPython 是 3.8.10**（3.9 起官方不再支持 Win7；3.8 也已 EOL）。
-  所以**发布 Win7 产物要用 3.8 构建**。
-- 但源码**只用 3.6 能解析的语法**（不用 `from __future__ import annotations`、不用 dataclass、
+**结论先说**：Win7 这条路径**原理上可行，但我们没有 Win7 真机/虚拟机，尚未实测**。能做的都做了：
+把版本组合钉死、把唯一"起不来"级的运行时依赖打进产物、并让 CI 机械校验。剩下那一次真机验证
+只能靠你或用户（见文末"如何补上验证"）。
+
+### 版本组合（为什么必须是这几个"老"版本）
+
+| 组件 | 选定 | 为什么不能更新 |
+|---|---|---|
+| CPython | **3.8.10** | **最后一个支持 Win7 的版本**。3.9+ 的 `pythonXY.dll` 依赖 `api-ms-win-core-path-l1-1-0.dll`（Win8+ 的 API set），在 Win7 上直接起不来；python.org 下载页对 3.9+ 明写 "cannot be used on Windows 7 or earlier"，PyInstaller 维护者的答复也是"想支持 Win7 只能用 3.8 或更老" |
+| PyInstaller | **5.13.2**（CI 固定） | 6.x 官方支持矩阵只到 **Windows 8+**（其 README 原话："should work on Windows 7 or newer, but we only officially support Windows 8+"）。bootloader 编译时会显式请求 Win7 特性级别（`_WIN32_WINNT=0x0601`） |
+| numpy | `>=1.21,<2`（py3.8 装到 1.24.x） | numpy 官方发布文档仍写 **"Windows 7, 8 and 10 are supported"**；但 1.25+ 要 py3.9 |
+| aiohttp | `>=3.8.6,<4`（py3.8 装到 3.10.x） | 3.11+ 要 py3.9 |
+| soundcard | `>=0.4.2` | 纯 CFFI + WASAPI；WASAPI loopback 自 Vista 起就有，Win7 可用 |
+| soxr | **不装** | 新版要 py3.9；重采样自动退回内置多相 FIR，功能不受影响 |
+
+### 唯一"起不来"级的坑：UCRT
+
+Python 3.8 的 exe 依赖 `api-ms-win-crt-*.dll` / `ucrtbase.dll`。这些在 Win10 是系统组件，
+**没打补丁的 Win7 SP1 上没有**，用户会看到 `api-ms-win-crt-runtime-l1-1-0.dll 缺失`
+（PyInstaller issue #1588、微软 KB2999226）。
+
+所以 `tools/build_win7_exe.py` 会把它们**一起打进 onefile**（优先取 Windows SDK 的
+`Redist\ucrt\DLLs\<arch>`，退回 Python 安装目录/System32），**并在打包后校验 DLL 真的在归档里** ——
+缺了就构建失败。这条校验的意义：我们没有 Win7，绝不允许 CI"绿着产出一个在 Win7 上起不来的包"。
+
+用户侧前提（记得写进发行说明）：
+
+- 需要 **Win7 SP1**（Python 3.8 与 UCRT 都要求 SP1）；
+- 系统没有 UCRT 也没关系，**产物已自带**（无需 KB2999226）；
+- 如果以后给 exe **做代码签名**，Win7 还需 **KB4474419**（SHA-2 支持）才能验证签名。
+
+### 如何补上验证（我们还没做的那一步）
+
+1. **最可靠**：找一台 Win7 SP1 虚拟机（VirtualBox/VMware + 你自己的授权介质），跑
+   `dist/easysub-helper.exe`，确认①窗口能弹出、②点「启动」后电平图会动、③配对码能显示。
+2. **弱验证（无需 Win7）**：在 Linux 上用 `wine` 把 `winver` 设成 Windows 7 跑一次 ——
+   能抓到"调用了 Win8+ 才有的 API"这类启动崩溃，但 WASAPI 采集在 Wine 下不可靠，只能当参考。
+3. 在真机验证之前，**README/商店页不要写"支持 Win7"**，写"已构建 Win7 档产物，未实测"更诚实。
+
+### 其它与老环境有关的约定
+
+- 源码**只用 3.6 能解析的语法**（不用 `from __future__ import annotations`、不用 dataclass、
   不用海象运算符），这样只有老解释器的构建机/CI 也能跑。`tests/test_py36_compat.py` 会把关：
   `ast.parse(feature_version=(3,6))` + 禁用 API 扫描。
-- **不要在这个进程里引入 onnxruntime**：onnxruntime 自 **1.15.0 起不再支持 Win7**
-  （识别推理留在页面的 wasm 里，正是这个原因）。这也是助手**连模型都不碰**的原因之一。
-- 依赖按版本分档（见 `pyproject.toml` 与 `requirements/`）：
-  aiohttp 3.9+ 要 3.8；numpy 1.20 要 3.7、1.25 要 3.9；soxr 新版要 3.9（装不上就自动用内置多相 FIR）。
+- **不要引入 onnxruntime**：它自 **1.15.0 起不再支持 Win7**（识别推理留在页面 wasm 里，这正是
+  助手连模型都不碰的原因之一）。
 - Win7 机器普遍内存小：页面侧建议用 lite 包（模型与推理都在页面那边，助手不管）。
-
----
 
 ## 品牌与图标（一律用插件 logo）
 
