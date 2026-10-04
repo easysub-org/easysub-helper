@@ -7,6 +7,7 @@
 DLL 找错目录），我们只会在用户机器上才知道。
 """
 
+import contextlib
 import io
 import os
 import shutil
@@ -109,31 +110,51 @@ class BuildCommandTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
-    def test_list_ucrt_returns_zero(self):
+    """跑 main() 时把输出捕获下来：既让 CI 日志干净，也能顺便断言提示语。"""
+
+    def _patch_dlls(self, dlls):
         original = bw.find_ucrt_dlls
-        bw.find_ucrt_dlls = lambda dirs: {"ucrtbase.dll": r"C:\x\ucrtbase.dll"}  # noqa: E731
+        bw.find_ucrt_dlls = lambda dirs: dict(dlls)  # noqa: E731
         self.addCleanup(lambda: setattr(bw, "find_ucrt_dlls", original))
-        self.assertEqual(bw.main(["--list-ucrt"]), 0)
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = bw.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_list_ucrt_returns_zero(self):
+        self._patch_dlls({"ucrtbase.dll": r"C:\x\ucrtbase.dll"})
+        code, out, _err = self._run(["--list-ucrt"])
+        self.assertEqual(code, 0)
+        self.assertIn("ucrtbase.dll", out)
+
+    def test_list_ucrt_says_something_when_nothing_found(self):
+        self._patch_dlls({})
+        code, out, _err = self._run(["--list-ucrt"])
+        self.assertEqual(code, 0)
+        self.assertIn("没找到", out)
 
     def test_missing_ucrt_is_an_error_not_a_silent_build(self):
-        original = bw.find_ucrt_dlls
-        bw.find_ucrt_dlls = lambda dirs: {}  # noqa: E731
-        self.addCleanup(lambda: setattr(bw, "find_ucrt_dlls", original))
-        self.assertEqual(bw.main([]), 2, "找不到 UCRT 必须报错，不能产出一个起不来的包")
+        self._patch_dlls({})
+        code, _out, err = self._run([])
+        self.assertEqual(code, 2, "找不到 UCRT 必须报错，不能产出一个起不来的包")
+        self.assertIn("api-ms-win-crt", err)
 
     def test_dry_run_prints_a_command(self):
-        original = bw.find_ucrt_dlls
-        bw.find_ucrt_dlls = lambda dirs: {"ucrtbase.dll": r"C:\x\ucrtbase.dll"}  # noqa: E731
-        self.addCleanup(lambda: setattr(bw, "find_ucrt_dlls", original))
-        self.assertEqual(bw.main(["--dry-run"]), 0)
+        self._patch_dlls({"ucrtbase.dll": r"C:\x\ucrtbase.dll"})
+        code, out, _err = self._run(["--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("--onefile", out)
+        self.assertIn("--add-binary", out)
 
     def test_non_windows_build_is_refused(self):
         if os.name == "nt":
             self.skipTest("Windows 上这条没有意义")
-        original = bw.find_ucrt_dlls
-        bw.find_ucrt_dlls = lambda dirs: {"ucrtbase.dll": r"C:\x\ucrtbase.dll"}  # noqa: E731
-        self.addCleanup(lambda: setattr(bw, "find_ucrt_dlls", original))
-        self.assertEqual(bw.main([]), 2, "非 Windows 上必须拒绝真打包")
+        self._patch_dlls({"ucrtbase.dll": r"C:\x\ucrtbase.dll"})
+        code, _out, err = self._run([])
+        self.assertEqual(code, 2, "非 Windows 上必须拒绝真打包")
+        self.assertIn("只能在 Windows 上跑", err)
 
 
 if __name__ == "__main__":
