@@ -15,6 +15,7 @@
 
 import argparse
 import asyncio
+import io
 import logging
 import os
 import signal
@@ -40,6 +41,40 @@ CODE_ROTATE_SEC = 15.0
 
 
 # ---------------- 基础设施 ----------------
+def _soften_console_encoding():
+    """让 stdout/stderr 在"编码不了"时**不崩**，并尽量把中文保留下来。
+
+    为什么必须做：Windows 上把输出**重定向到文件/管道**时（CI、`> log.txt`、服务方式启动），
+    Python 用的是系统代码页（常见 cp1252），而不是控制台的 UTF-16 通道。于是：
+      * `argparse.print_help()` 直接写 `sys.stdout` → 中文抛 UnicodeEncodeError，进程崩（CI 就是这么红的）；
+      * 我们的 `_eprint()` 虽然吞异常不崩，但**每一行中文都被静默丢掉** → 代理版横幅里的端口、
+        配对码全没了，用户以为助手没起来。
+    解决：把两个流切成 UTF-8 + `errors="replace"`。重定向场景下中文能正常写出（GitHub 日志、
+    文本编辑器都按 UTF-8 读）；万一目标真收不了，也只是显示成 `?`，不会崩。
+    交互式控制台本来就是 UTF-8 通道，这一步等于没变；窗口界面（Tk）完全不受影响。
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:              # --windowed 打包后可能就没有
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:     # Python 3.7+
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:           # noqa: BLE001 - 只影响可读性，别在这崩
+                pass
+            continue
+        # Python 3.6 没有 reconfigure：用一层 TextIOWrapper 兜住（保留原流对象不动，只换包装）
+        buffer = getattr(stream, "buffer", None)
+        if buffer is None:
+            continue
+        try:
+            setattr(sys, name, io.TextIOWrapper(buffer, encoding="utf-8",
+                                                errors="replace", line_buffering=True))
+        except Exception:               # noqa: BLE001
+            pass
+
+
 def _stream():
     """打包成 --windowed（无控制台）时 sys.stdout/stderr 是 None：写入会炸，所以统一兜住。"""
     out = getattr(sys, "stderr", None)
@@ -214,6 +249,7 @@ def build_parser():
 
 
 def main(argv=None):
+    _soften_console_encoding()          # 必须在 parse_args 之前：--help 会直接写 sys.stdout
     set_language(resolve_language(argv))
     args = build_parser().parse_args(argv)
     if args.lang:
