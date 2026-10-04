@@ -47,10 +47,10 @@ dependencies = [
 # soundcard 的 Requires-Python 是 >=3.5，纯 CFFI，**不需要编译器**——这正是选它的原因
 # （pyaudiowpatch 那种需要 CPython 扩展的，在 py3.6/3.7 + Win7 上经常没有可用 wheel）。
 # Linux 上还有零依赖的 parec/pw-record 子进程后端，见 easysub_helper.audio。
-capture = ["soundcard>=0.4.2"]
+capture = ["soundcard>=0.4.2,<0.5"]
 # 高质量重采样（带状态、任意比）。缺失时自动回落到内置多相 FIR，功能不受影响。
 # 注意：soxr 新版要求 py>=3.9，老解释器上装不上就直接跳过这个 extra。
-quality = ["soxr>=0.3.7"]
+quality = ["soxr>=0.3.7 ; python_version >= '3.9'"]
 dev = ["pytest>=7 ; python_version >= '3.7'"]
 
 [project.scripts]

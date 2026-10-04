@@ -149,6 +149,14 @@ def main(argv=None):
             print("（没找到 UCRT；在 Windows 上请确认装了 Windows SDK 或用的是 python.org 的 CPython）")
         return 0
 
+    # --dry-run 要能在**任何**机器上核对参数（文档承诺"Linux 上也能跑"），
+    # 所以它必须排在"找不到 UCRT 就报错"之前：没有 DLL 时也照样打印命令，只多一句提示。
+    if args.dry_run:
+        if not dlls:
+            print("# 注意：本机没找到 UCRT（真实打包会被拒绝）；下面是去掉 --add-binary 后的命令骨架")
+        print(" ".join(build_command(sys.executable, dlls, name=args.name)))
+        return 0
+
     if not dlls:
         print("错误：找不到 UCRT 的 DLL（api-ms-win-crt-*.dll / ucrtbase.dll）。"
               "Win7 产物必须把它们一起打包，否则未打补丁的 Win7 会报 api-ms-win-crt-runtime 缺失。",
@@ -156,9 +164,6 @@ def main(argv=None):
         return 2
 
     cmd = build_command(sys.executable, dlls, name=args.name)
-    if args.dry_run:
-        print(" ".join(cmd))
-        return 0
 
     if os.name != "nt":
         print("错误：真正打包只能在 Windows 上跑（当前 os.name={}）。"

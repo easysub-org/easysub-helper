@@ -17,7 +17,7 @@ import sys
 
 import numpy as np
 
-from .base import AudioBackend, BackendError
+from .base import AudioBackend, BackendError, com_initialize, com_uninitialize
 from ..i18n import t
 
 # 目标采样率打不开时的回落序列（WASAPI 共享模式受混音格式限制，硬要 16k 可能被拒）
@@ -39,6 +39,39 @@ def import_soundcard():
     return soundcard
 
 
+def prepare_com_for_soundcard():
+    """在本线程准备 COM —— **顺序很关键：先 import soundcard，再补我们自己的初始化**。
+
+    为什么不能反：soundcard 的 `_COMLibrary` 是**模块级单例**，在 import 期就调用
+    `CoInitializeEx(NULL, COINIT_MULTITHREADED)`，而它的 `check_error` **只把 S_OK(0) 当成功**。
+    如果我们抢先初始化了 MTA，它拿到的就是 S_FALSE(1) → 直接抛
+    `RuntimeError: Error 0x100000001`（本机实测复现，见 tests/test_windows_com.py）。
+    所以顺序必须是：
+
+      ① ``import soundcard``：首次 import 的那个线程由它自己完成 CoInitializeEx，返回 S_OK；
+      ② 我们再 `com_initialize()`：同线程同模式会拿到 S_FALSE（**不是**我们初始化的 → 不配对释放）；
+         "模块已经在别的线程 import 过"的线程（采集线程、GUI 枚举线程）这里会拿到 S_OK → 由我们释放。
+
+    返回 True = 本线程这次由**我们**初始化了 COM，收尾时须调用 `com_uninitialize()`。
+    """
+    _module, com_taken = import_and_prepare_com()
+    return com_taken
+
+
+def import_and_prepare_com():
+    """import soundcard 并按正确顺序准备本线程 COM；返回 ``(模块或 None, com_taken)``。
+
+    顺序的理由见 `prepare_com_for_soundcard`。返回模块是为了让调用方**不要二次 import**
+    （虽然只是 sys.modules 命中，但把"先 import 再初始化"这条纪律收在一处更不容易写错）。
+    """
+    module = None
+    try:
+        module = import_soundcard()
+    except Exception:  # noqa: BLE001 - 没装/没有音频服务：留给调用方报明确的错
+        pass
+    return module, com_initialize()
+
+
 class SoundcardBackend(AudioBackend):
     name = "soundcard"
 
@@ -47,6 +80,21 @@ class SoundcardBackend(AudioBackend):
         self.exclusive = bool(exclusive)
         self._mic = None
         self._rec = None
+        #: 本线程的 COM 是不是**我们**初始化的（决定收尾时要不要 CoUninitialize）
+        self._com_initialized = False
+
+    def prepare_thread(self):
+        """WASAPI 的 COM 必须在**要用它的线程**里初始化（顺序见 prepare_com_for_soundcard）。
+
+        否则一去读设备就报 0x800401f0（CO_E_NOTINITIALIZED）—— 用户实测的
+        `采集故障：Error 0x800401f0` 就是这个（soundcard 的 _com 只覆盖它被 import 的线程）。
+        """
+        self._com_initialized = prepare_com_for_soundcard()
+
+    def cleanup_thread(self):
+        if self._com_initialized:
+            com_uninitialize()
+            self._com_initialized = False
 
     def open(self):
         sc = import_soundcard()
@@ -113,10 +161,17 @@ class SoundcardBackend(AudioBackend):
         return np.ascontiguousarray(arr, dtype=np.float32)
 
     def close(self):
-        rec, self._rec = self._rec, None
-        if rec is not None:
-            try:
-                rec.__exit__(None, None, None)
-            except Exception:  # noqa: BLE001 - 释放设备失败不阻塞停止流程
-                pass
-        self._opened = False
+        # close() 可能被**另一个线程**调用（CaptureSession.stop() 由服务线程执行、read 阻塞时
+        # 顶不开就由调用方收尾），所以这里也确保当前线程有 COM 公寓；只释放本次自己拿到的。
+        taken = com_initialize()
+        try:
+            rec, self._rec = self._rec, None
+            if rec is not None:
+                try:
+                    rec.__exit__(None, None, None)
+                except Exception:  # noqa: BLE001 - 释放设备失败不阻塞停止流程
+                    pass
+            self._opened = False
+        finally:
+            if taken:
+                com_uninitialize()

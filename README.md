@@ -131,6 +131,12 @@ Linux 上装 tkinter：`sudo apt install python3-tk`（Debian/Ubuntu）、
 
 ---
 
+- **锁定是全局的**：60 秒内失败 5 次 → 锁 300 秒（期间连正确码也拒）。这是有意的（本机只有一个用户），但也意味着本机任意页面、或开了 `--allow-lan` 之后的局域网机器都能
+  "用错码把配对锁住"进行骚扰 —— 用户在助手窗口点「换一个」即可解锁。所以**别在不可信网络里开 `--allow-lan`**。
+- `/api/pair` 的 **Origin 白名单是硬闸门**（有 Origin 但不允许 → 403），不只是 CORS 响应头；
+  没有 Origin 的请求（curl/脚本等非浏览器客户端）默认也拒绝，需要时用 `--allow-origin` 或
+  `allow_no_origin` 显式放行。
+
 ## 协议速查
 
 ```

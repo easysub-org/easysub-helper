@@ -74,8 +74,6 @@ class OriginTest(unittest.TestCase):
         self.assertTrue(security.origin_ok_or_missing("http://127.0.0.1:8790", 8790))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ExtensionOriginTest(unittest.TestCase):
@@ -96,3 +94,6 @@ class ExtensionOriginTest(unittest.TestCase):
 
     def test_can_be_turned_off(self):
         self.assertFalse(security.origin_ok("chrome-extension://abc", 8790, allow_extensions=False))
+
+if __name__ == "__main__":
+    unittest.main()

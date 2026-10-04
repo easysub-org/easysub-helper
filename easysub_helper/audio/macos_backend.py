@@ -51,7 +51,7 @@ class PysysaudioCapture(object):
             raise BackendError(t("audio.err.pysysaudioOpen", error=exc))
         checker = getattr(pysysaudio, "SystemAudioRecorder", None)
         if checker is None:
-            raise BackendError(t("audio.err.pysysaudioOpen", error="SystemAudioRecorder 缺失"))
+            raise BackendError(t("audio.err.pysysaudioNoRecorder"))
         if hasattr(checker, "check_permission"):
             try:
                 if not checker.check_permission():
@@ -59,7 +59,7 @@ class PysysaudioCapture(object):
             except BackendError:
                 raise
             except Exception as exc:  # noqa: BLE001 - 老版本没有该方法时忽略
-                LOG.debug("pysysaudio 权限检测失败（忽略）: %s", exc)
+                LOG.debug(t("log.pysysaudioPermCheck"), exc)
         try:
             self._rec = checker(sample_rate=self.rate, channels=1, format="numpy", dtype="float32")
             self._rec.start_recording()          # 只要流，不落文件
@@ -113,7 +113,7 @@ class MacSystemBackend(AudioBackend):
                 return
             except Exception as exc:  # noqa: BLE001 - 回落是设计的一部分
                 self._fallback_error = exc
-                LOG.info("pysysaudio 不可用，回落到 soundcard：%s", exc)
+                LOG.info(t("log.pysysaudioFallback"), exc)
         inner = SoundcardBackend(source=self.source, device=self.device, rate=self.rate,
                                  frame_ms=self.frame_ms)
         try:

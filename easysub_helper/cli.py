@@ -197,7 +197,7 @@ async def _serve(server, pairing):
         _eprint(t("run.banner.debugToken"))
     elif state.get("valid"):
         _eprint(t("run.banner.pairCode", code=format_code(state["code"]),
-                  ttl=state["remainingSec"] // 60))
+                  ttl=max(1, int(round(state["remainingSec"] / 60.0)))))
         _eprint(t("run.banner.pairHint"))
     _eprint(t("run.banner.stop"))
     _eprint("")

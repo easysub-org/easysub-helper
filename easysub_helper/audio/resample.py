@@ -159,7 +159,7 @@ def create_resampler(in_rate, out_rate, prefer=None):
                 return PolyphaseResampler(in_rate, out_rate)
             if kind == "identity":
                 return IdentityResampler(in_rate)
-            raise ValueError("未知的重采样实现: {!r}".format(kind))
+            raise ValueError(t("resample.err.unknownKind", kind=repr(kind)))
         except ImportError as exc:      # 没装 soxr
             last_err = exc
         except ResampleUnavailable as exc:

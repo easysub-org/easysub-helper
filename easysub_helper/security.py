@@ -38,13 +38,24 @@ def new_token() -> str:
     return secrets.token_urlsafe(TOKEN_BYTES)
 
 
+def safe_compare(a, b) -> bool:
+    """常数时间比较，且**对非 ASCII 安全**。
+
+    坑（真机复现）：`hmac.compare_digest` 的 str 重载要求两侧都是 ASCII，否则抛
+    `TypeError: comparing strings with non-ASCII characters is not supported`。配对码或
+    Origin 里只要有一个非 ASCII 字符，`/api/pair` / `/api/pair/info` 就会 500，而且抛异常
+    发生在"记一次失败"之前 → **限速被绕过**。所以统一先 encode 成 bytes 再比。
+    """
+    if not isinstance(a, str) or not isinstance(b, str):
+        return False
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
 def token_ok(provided, expected) -> bool:
     """常数时间比较。空 expected（未启用）或空 provided 一律拒绝。"""
     if not expected or not provided:
         return False
-    if not isinstance(provided, str):
-        return False
-    return hmac.compare_digest(provided, expected)
+    return safe_compare(provided, expected)
 
 
 def is_loopback_host(host: str) -> bool:
@@ -127,7 +138,7 @@ def origin_ok(origin, port: int, extra=None, allow_extensions=True) -> bool:
     if is_loopback_origin(origin):
         return True
     for allowed in allowed_origins(port, extra):
-        if hmac.compare_digest(origin, allowed):
+        if safe_compare(origin, allowed):
             return True
     return False
 

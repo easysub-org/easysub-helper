@@ -206,7 +206,7 @@ class HelperServer(object):
 
     def _valid_token(self, token):
         if self.fixed_token:
-            return bool(token) and token == self.fixed_token
+            return security.token_ok(token, self.fixed_token)   # 常数时间（--token 调试模式）
         if self.pairing is None:
             return False
         return self.pairing.token_valid(token)
@@ -250,7 +250,8 @@ class HelperServer(object):
 
     # ---------------- 配对 ----------------
     async def handle_pair_info(self, request):
-        """探测接口：页面据此决定是否显示「从桌面助手获取音频」。
+        """探测接口：页面据此判断「有没有助手、我配过没有、助手是否暂停」。
+        （音源常驻显示，本接口不再决定"显示不显示"。）
 
         只回最小信息（无令牌、无设备名、无路径）。`paired` 表示**本次请求带的令牌**是否有效，
         因此页面一次调用就能判断"有没有助手 + 我配过没有"。
@@ -275,6 +276,17 @@ class HelperServer(object):
         return self._json(request, {}, status=204)
 
     async def handle_pair(self, request):
+        # **无令牌端点：Origin 白名单在这里是真闸门**（不只是加 CORS 响应头）。
+        # 之前只回响应头、照样处理请求 —— 一个不触发预检的"简单请求"（text/plain、无 Content-Type）
+        # 就能从任意网页驱动配对尝试，与本文件"白名单是唯一防线"的说法不符（独立审查发现）。
+        # 没有 Origin 的请求（curl/脚本等非浏览器客户端）按 allow_no_origin 决定；
+        # 浏览器一定带 Origin，所以这条不会放松对网页的约束。
+        origin = request.headers.get("Origin")
+        if not self._origin_allowed(origin, allow_missing=self.allow_no_origin):
+            logging.getLogger("easysub-helper").warning(
+                t("log.pairOriginDenied", origin=origin or t("log.noOrigin")))
+            return self._json(request, {"ok": False, "code": protocol.ERR_FORBIDDEN,
+                                        "message": t("server.err.originDenied")}, status=403)
         if self.pairing is None and not self.fixed_token:
             return self._json(request, {"ok": False, "code": protocol.ERR_FORBIDDEN,
                                         "message": t("server.err.forbidden")}, status=403)

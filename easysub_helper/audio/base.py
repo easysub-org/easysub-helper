@@ -11,13 +11,60 @@
 """
 
 
+import logging
 import threading
 import time
 
 import numpy as np
 
 from .resample import ResampleUnavailable, create_resampler
+from .. import config
 from ..i18n import t
+
+LOG = logging.getLogger("easysub-helper")
+
+
+# ---------------- Windows / COM ----------------
+#: COM HRESULT（0x80010106 = RPC_E_CHANGED_MODE）
+_COM_S_OK = 0
+_COM_S_FALSE = 1
+_COM_RPC_E_CHANGED_MODE = -2147417850
+
+
+def com_initialize():
+    """在**当前线程**初始化 COM；返回 True 表示"这次真的初始化了"（须在同线程配对
+    `com_uninitialize()`）。
+
+    为什么必须自己做：Windows 上 soundcard 的 `_com` 是**模块级单例**，它只在 import 它的
+    那个线程上调用过 `CoInitializeEx`。而我们的**读设备**跑在独立采集线程里、**设备枚举**跑在
+    GUI 的工作线程里 —— 这两个线程都没有 COM 公寓，于是 WASAPI 调用一律失败。用户实测的
+    报错就是这个：`采集故障：Error 0x800401f0`（CO_E_NOTINITIALIZED，"CoInitialize 没被调用"）。
+
+    用 MTA（`COINIT_MULTITHREADED`，与 soundcard 在非 Win8 上的选择一致）。线程已有公寓时
+    返回 S_FALSE(1)；已有的是 STA 则返回 RPC_E_CHANGED_MODE(0x80010106) —— 两者都表示
+    "COM 可用"，但都不是本次初始化的，所以返回 False（不该配对 Uninitialize）。
+    """
+    if not config.is_windows():
+        return False
+    try:
+        import ctypes
+
+        hr = int(ctypes.windll.ole32.CoInitializeEx(None, 0x0))   # COINIT_MULTITHREADED
+    except Exception:  # noqa: BLE001 - 非 Windows 上没有 windll；真失败就当没初始化
+        return False
+    return hr == _COM_S_OK
+
+
+def com_uninitialize():
+    """与 `com_initialize()` 配对（**必须在同一个线程**里调用，且只有它返回过 True 才该调）。"""
+    if not config.is_windows():
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.ole32.CoUninitialize()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class BackendError(RuntimeError):
@@ -36,6 +83,16 @@ class AudioBackend(object):
     """
 
     name = "base"
+
+    def prepare_thread(self):
+        """采集线程启动钩子（默认什么都不做）。
+
+        在**即将 open() 的那个线程**上调用 —— Windows/WASAPI 必须在这里初始化 COM，
+        因为 soundcard 的模块级单例只覆盖它自己被 import 时所在的那个线程。
+        """
+
+    def cleanup_thread(self):
+        """采集线程收尾钩子（默认什么都不做），在 close() 之后、线程退出之前调用。"""
 
     def __init__(self, source="system", device=None, rate=16000, frame_ms=20):
         self.source = source
@@ -145,6 +202,10 @@ class CaptureSession(object):
                 except Exception:  # noqa: BLE001 - 停止路径上的异常不向外抛
                     pass
                 thread.join(timeout)
+                if thread.is_alive():
+                    # 阻塞在 read() 里没被顶开：设备可能仍被占用，而快照马上会报 capturing=false ——
+                    # 不留一条日志的话现场就"消失"了（独立审查指出）
+                    LOG.warning(t("log.stopTimeout"))
         with self._lock:
             self._thread = None
             self._running = False
@@ -152,6 +213,7 @@ class CaptureSession(object):
     # --- 线程主体 ---
     def _run(self):
         try:
+            self.backend.prepare_thread()
             self.backend.open()
             in_rate = int(self.backend.native_rate)
             self._resampler = create_resampler(in_rate, self.target_rate)
@@ -189,6 +251,10 @@ class CaptureSession(object):
         finally:
             try:
                 self.backend.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.backend.cleanup_thread()
             except Exception:  # noqa: BLE001
                 pass
             with self._lock:

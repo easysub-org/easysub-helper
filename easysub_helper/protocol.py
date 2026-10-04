@@ -12,10 +12,9 @@
 
   GET  /api/pair/info                 探测：助手在不在？我配过没有？（无鉴权，只回最小信息）
   POST /api/pair  {"code":"ABC-123"}  配对：配对码换长期令牌 → {"ok":true,"token":"..."}
-  GET  /pair                          助手自带的极简配对页（用户在这里输入配对码）
 
 页面拿到令牌后持久化保存（建议 localStorage），之后 `?token=` 或 `X-Easysub-Token` 头带上它。
-**只有探测成功（`/api/pair/info` 返回 ok）时，页面才应该显示「从桌面助手获取音频」这个音源。**
+**音源常驻显示**：`/api/pair/info` 只用来告诉页面「有没有助手、这个浏览器配过没有、助手是不是暂停了」，不再决定音源是否出现（早期「探测到才显示」已废弃：用户实测在 Web 版里因此根本找不到这个音源，连怎么配对都无从下手）。**配对成功才允许开始识别。**
 
 ## 传输
 
@@ -54,14 +53,16 @@
 **前端应当按 `code` 用自己的 i18n 渲染文案**，`message` 只是桌面端语言下的兜底
 （桌面端所有文案见 easysub_helper/i18n.py）。已定义的码：
 
-  bad_message / already_capturing / not_capturing / capture_failed / resample_unavailable
-  / backend_unavailable / forbidden / not_paired / **paused**
+  bad_message / capture_failed / forbidden / **paused**
   / bad_code / code_expired / locked / no_code        （配对相关）
+
+采集 / 设备 / 重采样故障统一表现为 `capture_failed`，具体原因在 `message` 里（不另设码）。
 
 `paused` 的含义：助手窗口的「启动 / 暂停」总开关处于暂停（**默认就是暂停**）。此时客户端发
 `start` 不会打开采集设备，页面应当提示用户去助手窗口点「启动」；而连接与静音帧不受影响。
 
-注意：**鉴权在握手时做**（`/ws` 只认设备令牌；`/api/pair` 还要 Origin 白名单 + 配对码），
+注意：**鉴权在握手时做**（`/ws` 只认设备令牌；`/api/pair` 的 Origin 白名单是**真闸门**
+（不允许的来源直接 403），再加配对码与失败限速），
 握手通过后不再逐帧校验，因为本机回环连接建立后没有第三方能插进来。
 """
 
@@ -88,15 +89,12 @@ CLIENT_MESSAGE_TYPES = (CLIENT_START, CLIENT_STOP, CLIENT_PING)
 
 # 错误码
 ERR_BAD_MESSAGE = "bad_message"
-ERR_ALREADY_CAPTURING = "already_capturing"
-ERR_NOT_CAPTURING = "not_capturing"
 ERR_CAPTURE_FAILED = "capture_failed"
 #: 助手窗口的总开关处于暂停（默认）：页面请求开始音频会被拒，等用户点「启动」
 ERR_PAUSED = "paused"
-ERR_RESAMPLE_UNAVAILABLE = "resample_unavailable"
-ERR_BACKEND_UNAVAILABLE = "backend_unavailable"
 ERR_FORBIDDEN = "forbidden"
 # 配对相关（与 pairing.py 的 ERR_* 保持一致；前端按 code 渲染自己的文案）
+#: 预留（服务端目前不发送；前端已认识它，将来要用就直接发）
 ERR_NOT_PAIRED = "not_paired"
 ERR_BAD_CODE = "bad_code"
 ERR_CODE_EXPIRED = "code_expired"

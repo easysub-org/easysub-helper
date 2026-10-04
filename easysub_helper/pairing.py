@@ -4,7 +4,8 @@
 
 流程：
   1. 助手启动时生成一次性配对码（6 位、默认 10 分钟有效），打印在控制台；
-  2. 页面**探测** `/api/pair/info`：只有探测成功，才把「从桌面助手获取音频」这个音源显示出来；
+  2. 页面**探测** `/api/pair/info`：用来判断「有没有助手、这个浏览器配过没有、助手是否暂停」；
+     音源是**常驻显示**的（早期「探测到才显示」已废弃），但**配对成功才允许开始识别**；
   3. 用户在页面输入配对码 → `POST /api/pair` → 校验通过后下发**长期设备令牌**；
   4. 令牌由页面保存，之后 WS 与 `/api/*` 都用它，不再需要配对码。
 
@@ -16,12 +17,11 @@
 
 安全参数：
   - `MAX_ATTEMPTS=5`：60 秒窗口内失败 5 次 → 锁 300 秒（期间一律拒绝，含正确码）；
-  - 配对码可 `easysub-helper pair --new` 随时轮换，重新生成会立刻作废旧码；
+  - 配对码可在**助手窗口点「换一个」**随时轮换（无窗口模式每 15 秒自动轮换），重新生成会立刻作废旧码；
   - 令牌只在配对成功时下发；本地只存 **sha256 哈希**（文件泄漏也不等于令牌泄漏）。
 """
 
 import hashlib
-import hmac
 import json
 import os
 import secrets
@@ -29,6 +29,7 @@ import threading
 import time
 
 from .config import data_dir
+from .security import safe_compare
 from .i18n import t
 
 #: 去掉容易看错的 0/O/1/I/L
@@ -42,7 +43,9 @@ TOKEN_BYTES = 32
 STORE_VERSION = 1
 
 ERR_BAD_CODE = "bad_code"
-ERR_EXPIRED = "expired"
+# 与 protocol.ERR_CODE_EXPIRED / 前端 helperErrorKey 一致（历史上发过 "expired"，
+# 前端现在两个都认，但线上以这个为准）
+ERR_EXPIRED = "code_expired"
 ERR_LOCKED = "locked"
 ERR_NO_CODE = "no_code"
 
@@ -158,7 +161,7 @@ class PairingManager(object):
                 return False, ERR_NO_CODE
             if now >= self._code_expires:
                 return False, ERR_EXPIRED
-            if normalized and hmac.compare_digest(normalized, self._code):
+            if normalized and safe_compare(normalized, self._code):
                 self._attempts = []
                 return True, None
             # 失败：记一次并可能触发锁定
@@ -196,7 +199,7 @@ class PairingManager(object):
         digest = _hash_token(token)
         with self._lock:
             for stored in self._tokens:
-                if hmac.compare_digest(digest, stored):
+                if safe_compare(digest, stored):
                     return True
         return False
 

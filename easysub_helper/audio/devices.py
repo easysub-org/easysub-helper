@@ -165,21 +165,31 @@ def _pactl_short_names(source):
 def _soundcard_names(source):
     """用 soundcard 枚举设备名；任何异常（没装/没有音频服务）都当"枚举不到"。"""
     try:
-        from .soundcard_backend import import_soundcard
-
-        soundcard = import_soundcard()
+        from .soundcard_backend import com_uninitialize, import_and_prepare_com
+    except Exception:  # noqa: BLE001 - 没装 soundcard
+        return []
+    # Windows 上枚举设备同样走 COM，而这里是 GUI 的工作线程 → 也要（按正确顺序）准备 COM。
+    # 注意：**读 `mic.name` / `mic.isloopback` 也要公寓**（它们会 CoCreateInstance 去问设备），
+    # 所以 COM 必须活到整个循环结束，不能只包住 all_microphones()。
+    soundcard, com_taken = import_and_prepare_com()
+    try:
+        if soundcard is None:
+            return []
         mics = soundcard.all_microphones(include_loopback=(source == "system")) or []
+        names = []
+        for mic in mics:
+            name = getattr(mic, "name", None) or str(mic)
+            loopback = bool(getattr(mic, "isloopback", False))
+            if (source == "system") != loopback:
+                continue
+            if name and name not in names:
+                names.append(name)
+        return names
     except Exception:  # noqa: BLE001 - 没声卡/没服务/PulseAudio 拒绝连接
         return []
-    names = []
-    for mic in mics:
-        name = getattr(mic, "name", None) or str(mic)
-        loopback = bool(getattr(mic, "isloopback", False))
-        if (source == "system") != loopback:
-            continue
-        if name and name not in names:
-            names.append(name)
-    return names
+    finally:
+        if com_taken:
+            com_uninitialize()
 
 
 def list_devices(source="mic", prefer_pactl=None):

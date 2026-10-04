@@ -57,7 +57,7 @@ _STRINGS = {
         "run.banner.port": "端口     : {port}",
         "run.banner.source": "音源     : {source}（后端 {backend}）",
         "run.banner.pairCode": "配对码   : {code}   （{ttl} 分钟内有效；在页面里输入它完成配对）",
-        "run.banner.pairHint": "页面上只有配对成功后，才会出现「从桌面助手获取音频」这个音源",
+        "run.banner.pairHint": "在页面里把音源选成「桌面助手」，再把这串码填进去即可",
         "run.banner.debugToken": "[debug] 已用 --token 指定固定令牌，跳过配对码校验",
         "run.banner.stop": "退出     : Ctrl+C",
         "run.err.hostNotLoopback": "ERROR: --host {host} 不是回环地址。本服务会把本机音频交给连上来的页面，\n       暴露到局域网等于把音频流公开。确需如此请显式加 --allow-lan（自担风险）。",
@@ -123,6 +123,13 @@ _STRINGS = {
 
         # ---- 服务端 ----
         "server.err.forbidden": "没有权限（设备令牌无效或来源不被允许）",
+        "server.err.originDenied": "这个页面来源不被允许配对：只有本机页面（http://127.0.0.1 / localhost）或浏览器扩展可以",
+        "log.stopTimeout": "采集线程没有在超时内退出（设备可能仍被占用），已停止等待",
+        "log.pysysaudioPermCheck": "pysysaudio 权限检测失败（忽略）：{error}",
+        "log.pysysaudioFallback": "pysysaudio 不可用，回落到 soundcard：{error}",
+        "audio.err.pysysaudioNoRecorder": "这个 pysysaudio 版本没有 SystemAudioRecorder（需要 macOS 14.2+ 的版本）",
+        "log.pairOriginDenied": "拒绝配对：来源不被允许（Origin={origin}）",
+        "log.noOrigin": "（无 Origin）",
         "server.err.pairBody": "配对请求体不是合法 JSON",
         "server.err.badMessage": "客户端消息不合法：{detail}",
         "server.err.binaryFrame": "客户端不应发送二进制帧",
@@ -159,6 +166,7 @@ _STRINGS = {
         # ---- 重采样 ----
         "resample.err.unavailable": "无法重采样 {from_rate} -> {to_rate}（{detail}）。请安装 soxr 或 numpy。",
         "resample.err.badRate": "采样率必须为正",
+        "resample.err.unknownKind": "未知的重采样实现：{kind}",
         "resample.err.designFailed": "原型滤波器设计失败（采样率比异常：{from_rate}/{to_rate}）",
         "resample.err.noStream": "soxr 缺少 ResampleStream（需要 soxr>=0.3.5）",
 
@@ -196,7 +204,7 @@ _STRINGS = {
         "run.banner.port": "Port     : {port}",
         "run.banner.source": "Source   : {source} (backend {backend})",
         "run.banner.pairCode": "Pair code: {code}   (valid for {ttl} minutes; type it in the page to pair)",
-        "run.banner.pairHint": "pick \"get audio from desktop helper\" in the page, then type this code there",
+        "run.banner.pairHint": "pick \"Desktop helper\" as the audio source in the page, then type this code there",
         "run.banner.debugToken": "[debug] a fixed --token was given, pair-code verification is skipped",
         "run.banner.stop": "Quit     : Ctrl+C",
         "run.err.hostNotLoopback": "ERROR: --host {host} is not a loopback address. This service hands local audio to any page\n       that connects; exposing it on the LAN publishes your audio stream. If you really need\n       this, pass --allow-lan explicitly (at your own risk).",
@@ -262,6 +270,13 @@ _STRINGS = {
 
         # ---- 服务端 ----
         "server.err.forbidden": "forbidden (bad device token or disallowed origin)",
+        "server.err.originDenied": "this page origin is not allowed to pair: only local pages (http://127.0.0.1 / localhost) or browser extensions may",
+        "log.stopTimeout": "capture thread did not exit within the timeout (device may still be in use)",
+        "log.pysysaudioPermCheck": "pysysaudio permission check failed (ignored): {error}",
+        "log.pysysaudioFallback": "pysysaudio unavailable, falling back to soundcard: {error}",
+        "audio.err.pysysaudioNoRecorder": "this pysysaudio version has no SystemAudioRecorder (needs the macOS 14.2+ build)",
+        "log.pairOriginDenied": "pairing refused: origin not allowed (Origin={origin})",
+        "log.noOrigin": "(no Origin)",
         "server.err.pairBody": "pairing request body is not valid JSON",
         "server.err.badMessage": "invalid client message: {detail}",
         "server.err.binaryFrame": "clients must not send binary frames",
@@ -298,6 +313,7 @@ _STRINGS = {
         # ---- 重采样 ----
         "resample.err.unavailable": "cannot resample {from_rate} -> {to_rate} ({detail}). Install soxr or numpy.",
         "resample.err.badRate": "sample rates must be positive",
+        "resample.err.unknownKind": "unknown resampler implementation: {kind}",
         "resample.err.designFailed": "prototype filter design failed (bad rate ratio: {from_rate}/{to_rate})",
         "resample.err.noStream": "soxr has no ResampleStream (requires soxr>=0.3.5)",
 

@@ -8,6 +8,7 @@
 3. 语言判定与归一化（zh-CN/zh_CN.UTF-8/en-US…）。
 """
 
+import ast
 import io
 import os
 import re
@@ -29,6 +30,57 @@ def _iter_sources():
             if not name.endswith(".py") or name in SKIP_FILES:
                 continue
             yield os.path.join(base, name)
+
+
+
+class NoHardcodedChineseTest(unittest.TestCase):
+    """机械闸门：非 i18n.py 的源码里不许出现中文字符串字面量。
+
+    为什么需要它：窗口的**日志区正文**也算用户可见文案，而"两个目录对称 + t(key) 存在"
+    这两条检查都抓不到硬编码（独立审查发现 macos_backend.py 有三处：一条会拼进英文错误串、
+    两条直接进日志区）。白名单里的四条是 `devices.py` 解析 `pactl` 本地化输出用的**输入匹配**，
+    不是文案。
+    """
+
+    ALLOWED = {
+        (os.path.join("audio", "devices.py"), "名称"),
+        (os.path.join("audio", "devices.py"), "描述"),
+        (os.path.join("audio", "devices.py"), "："),
+    }
+
+    CJK = re.compile(r"[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]")
+
+    @staticmethod
+    def _docstring_ids(tree):
+        ids = set()
+        for node in ast.walk(tree):
+            body = getattr(node, "body", None)
+            # 注意 ast.Lambda.body 是**单个表达式**而不是列表（踩过：会 TypeError）
+            if not isinstance(body, list) or not body:
+                continue
+            first = body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) \
+                    and isinstance(first.value.value, str):
+                ids.add(id(first.value))
+        return ids
+
+    def test_no_bare_chinese_literals_outside_i18n(self):
+        package_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                    "easysub_helper")
+        offenders = []
+        for path in _iter_sources():                    # 复用上面的遍历（已跳过 i18n.py）
+            rel = os.path.relpath(path, package_root)
+            tree = ast.parse(io.open(path, encoding="utf-8").read())
+            skip = self._docstring_ids(tree)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                    continue
+                if id(node) in skip or not self.CJK.search(node.value):
+                    continue
+                if (rel, node.value) in self.ALLOWED:
+                    continue
+                offenders.append("%s:%d %r" % (rel, node.lineno, node.value[:60]))
+        self.assertEqual(offenders, [], "这些字符串没走 i18n（日志正文也算用户可见）：\n" + "\n".join(offenders))
 
 
 class CatalogTest(unittest.TestCase):
@@ -92,8 +144,12 @@ class LanguageTest(unittest.TestCase):
         self.assertEqual(i18n.t("definitely.not.a.key"), "definitely.not.a.key")
 
     def test_missing_format_arg_does_not_raise(self):
-        # 少传占位参数时宁可回退成原样文案，也不要抛异常把服务打断
-        self.assertTrue(i18n.t("run.banner.ui"))
+        # 少传占位参数时宁可回退成原样文案，也不要抛异常把服务打断。
+        # 注意：必须用**真实存在**的带占位符的 key，否则 `t()` 会把 key 原样返回，断言恒真
+        # （以前这里写的 "run.banner.ui" 根本没有这个 key —— 独立审查发现的假断言）。
+        text = i18n.t("run.banner.port")
+        self.assertTrue(text)
+        self.assertNotEqual(text, "run.banner.port", "这条断言必须真的能失败")
 
     def test_source_label(self):
         saved = i18n.get_language()

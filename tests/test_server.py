@@ -240,6 +240,67 @@ class HttpTest(ServerCase):
 
         self.with_server(body)
 
+    def test_pair_rejects_disallowed_origin(self):
+        """Origin 白名单必须是**真闸门**：不允许的来源连正确配对码也不给令牌。
+
+        （独立审查发现：以前只回不回 CORS 头，请求照样被处理并下发 token。）
+        """
+        async def body(session):
+            async with session.post(self.base + "/api/pair", json={"code": self.code},
+                                    headers={"Origin": "https://evil.example.com"}) as resp:
+                self.assertEqual(resp.status, 403)
+                data = await resp.json()
+                self.assertEqual(data["code"], "forbidden")
+                self.assertNotIn("token", data)
+            self.assertEqual(self.pairing.state()["devices"], 0, "不该因为被拒的请求发出令牌")
+
+        self.with_server(body)
+
+    def test_pair_rejects_simple_request_from_evil_origin(self):
+        """不触发 CORS 预检的"简单请求"（text/plain）同样要被拒。"""
+        async def body(session):
+            async with session.post(self.base + "/api/pair", data=json.dumps({"code": self.code}),
+                                    headers={"Origin": "https://evil.example.com",
+                                             "Content-Type": "text/plain"}) as resp:
+                self.assertEqual(resp.status, 403)
+
+        self.with_server(body)
+
+    def test_pair_rejects_missing_origin_unless_allowed(self):
+        """没有 Origin（curl/脚本）默认拒绝；显式 allow_no_origin 才放行。"""
+        async def body(session):
+            async with session.post(self.base + "/api/pair", json={"code": self.code}) as resp:
+                self.assertEqual(resp.status, 403)
+
+        self.with_server(body)
+
+        async def allowed(session):
+            async with session.post(self.base + "/api/pair", json={"code": self.code}) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertTrue((await resp.json())["ok"])
+
+        self.with_server(allowed, allow_no_origin=True)
+
+    def test_non_ascii_pair_code_is_bad_code_and_counts_toward_lockout(self):
+        """非 ASCII 配对码以前会 500 且**不计入限速**（compare_digest 抛 TypeError）→ 现在必须是干净的 bad_code。"""
+        async def body(session):
+            async with session.post(self.base + "/api/pair", json={"code": "测试"},
+                                    headers={"Origin": self.origin}) as resp:
+                self.assertEqual(resp.status, 403)
+                self.assertEqual((await resp.json())["code"], "bad_code")
+            self.assertEqual(len(self.pairing._attempts), 1, "失败必须计入限速，别被异常绕过")
+
+        self.with_server(body)
+
+    def test_non_ascii_origin_does_not_500(self):
+        async def body(session):
+            async with session.get(self.base + "/api/pair/info",
+                                   headers={"Origin": "http://exémple.com"}) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertTrue((await resp.json())["ok"])
+
+        self.with_server(body)
+
     def test_cors_only_for_allowed_origin(self):
         async def body(session):
             async with session.get(self.base + "/api/pair/info",
@@ -477,6 +538,51 @@ class SnapshotTest(ServerCase):
             self.assertIsNone(err)
             self.assertEqual(self.server.default_source, "mic")
             self.assertFalse(self.server.snapshot()["capturing"])
+
+        self.with_server(body)
+
+    def test_capture_thread_hooks_wrap_open_and_close(self):
+        """采集线程：prepare_thread() 必须在 open() 之前，cleanup_thread() 在 close() 之后。
+
+        Windows 就靠这两个钩子在**正确的线程**上 CoInitializeEx/CoUninitialize
+        （否则报 0x800401f0，用户实测）。
+        """
+        order = []
+        original = helper_server.create_backend
+
+        class LifecycleBackend(FakeBackend):
+            def prepare_thread(self):
+                order.append("prepare")
+
+            def open(self):
+                order.append("open")
+                FakeBackend.open(self)
+
+            def close(self):
+                order.append("close")
+                FakeBackend.close(self)
+
+            def cleanup_thread(self):
+                order.append("cleanup")
+
+        def factory(source="system", backend="auto", device=None, rate=16000, frame_ms=20):
+            return LifecycleBackend(source=source, device=device, rate=rate, frame_ms=frame_ms)
+
+        helper_server.create_backend = factory
+        self.addCleanup(lambda: setattr(helper_server, "create_backend", original))
+
+        async def body(_session):
+            self.assertTrue((await self.server.set_user_enabled(True))[0])
+            await asyncio.sleep(0.15)
+            self.assertTrue((await self.server.set_user_enabled(False))[0])
+            for _ in range(60):                     # close/cleanup 在采集线程的 finally 里
+                if "cleanup" in order:
+                    break
+                await asyncio.sleep(0.05)
+            self.assertEqual(order[:2], ["prepare", "open"], order)
+            self.assertIn("close", order, order)
+            self.assertIn("cleanup", order, order)
+            self.assertLess(order.index("close"), order.index("cleanup"), order)
 
         self.with_server(body)
 

@@ -137,6 +137,13 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("没找到", out)
 
+    def test_dry_run_prints_even_without_ucrt(self):
+        """文档承诺"Linux 上也能跑 --dry-run 核对参数"——没有 UCRT 也必须打印命令。"""
+        self._patch_dlls({})
+        code, out, _err = self._run(["--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("--onefile", out)
+
     def test_missing_ucrt_is_an_error_not_a_silent_build(self):
         self._patch_dlls({})
         code, _out, err = self._run([])
@@ -159,8 +166,6 @@ class MainTest(unittest.TestCase):
         self.assertIn("只能在 Windows 上跑", err)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class LauncherEntryTest(unittest.TestCase):
@@ -189,3 +194,6 @@ class LauncherEntryTest(unittest.TestCase):
         self.assertIn("easysub_helper.cli", [n.module for n in imports])
         self.assertEqual([n.level for n in imports if n.level], [],
                          "入口里不许有相对导入：PyInstaller 的静态分析看不到它们")
+
+if __name__ == "__main__":
+    unittest.main()
