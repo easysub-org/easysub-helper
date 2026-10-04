@@ -55,7 +55,13 @@ def _soften_console_encoding():
     """
     for name in ("stdout", "stderr"):
         stream = getattr(sys, name, None)
-        if stream is None:              # --windowed 打包后可能就没有
+        if stream is None:
+            # --windowed/--noconsole 打包后 sys.stdout/stderr 就是 None：argparse 的
+            # --version/--help（以及任何 print）会直接 AttributeError 崩掉。给个"黑洞"顶上。
+            try:
+                setattr(sys, name, open(os.devnull, "w", encoding="utf-8", errors="replace"))
+            except Exception:           # noqa: BLE001
+                pass
             continue
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:     # Python 3.7+

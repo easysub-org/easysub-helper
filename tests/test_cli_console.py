@@ -35,12 +35,20 @@ class SoftenStreamsTest(unittest.TestCase):
             sys.stdout = original
         self.assertIn("易字幕".encode("utf-8"), raw.getvalue())
 
-    def test_none_streams_are_ignored(self):
+    def test_none_streams_get_a_black_hole(self):
+        """--windowed/--noconsole 冻结后 sys.stdout 是 None：必须补上黑洞，否则 argparse 会崩。"""
         original_out, original_err = sys.stdout, sys.stderr
         sys.stdout = None
         sys.stderr = None
         try:
-            cli._soften_console_encoding()     # --windowed 打包后就是这个状态
+            cli._soften_console_encoding()
+            self.assertIsNotNone(sys.stdout, "None 的 stdout 应被换成黑洞流")
+            self.assertIsNotNone(sys.stderr)
+            sys.stdout.write("随便写点什么\n")   # 不许抛
+            # --version 走 argparse 的 version action，正常退出方式是 SystemExit(0)
+            with self.assertRaises(SystemExit) as ctx:
+                cli.main(["--version"])          # 冻结产物最常见的排障命令
+            self.assertEqual(ctx.exception.code, 0)
         finally:
             sys.stdout, sys.stderr = original_out, original_err
 

@@ -31,10 +31,36 @@ UCRT_PREFIX = "api-ms-win-crt-"
 UCRT_BASE = "ucrtbase.dll"
 
 DEFAULT_NAME = "easysub-helper"
-ENTRY = os.path.join("easysub_helper", "__main__.py")
+#: 入口必须是**静态导入**的 launcher.py：用 easysub_helper/__main__.py 时 PyInstaller
+#: 看不到运行期的 `from . import cli`，包里会没有 easysub_helper（实测崩溃）。
+ENTRY = "launcher.py"
 ICON = os.path.join("easysub_helper", "assets", "easysub.ico")
 #: assets 必须显式 add-data：onefile 模式不会自动带上包内数据文件
 ASSETS = "easysub_helper/assets" + os.pathsep + "easysub_helper/assets"
+
+
+def soften_streams():
+    """让这个脚本的 print 在 cp1252 控制台/CI 下也不崩。
+
+    讽刺的是：CI 上 py3.8/windows-2022 的这份 job 就是这么挂的 —— 脚本自己打印中文
+    （"将打入 N 个 UCRT DLL"）时抛 UnicodeEncodeError。优先复用包里的实现，装不上就自兜一份。
+    """
+    try:
+        from easysub_helper.cli import _soften_console_encoding
+    except Exception:  # noqa: BLE001 - 包没装也要能跑
+        def _soften_console_encoding():
+            for name in ("stdout", "stderr"):
+                stream = getattr(sys, name, None)
+                if stream is None:
+                    continue
+                reconfigure = getattr(stream, "reconfigure", None)
+                if reconfigure is None:
+                    continue
+                try:
+                    reconfigure(encoding="utf-8", errors="replace")
+                except Exception:  # noqa: BLE001
+                    pass
+    _soften_console_encoding()
 
 
 def find_ucrt_dlls(dirs):
@@ -80,6 +106,9 @@ def build_command(python_exe, dlls, name=DEFAULT_NAME, icon=ICON, entry=ENTRY, a
         "--icon", icon,
         "--add-data", assets,
         "--hidden-import", "soundcard",
+        # 收集整个包与 soundcard 的子模块：有些模块是运行期才 import 的（后端选择、设备枚举），
+        # 只靠静态分析容易漏，漏了就是运行时报 ModuleNotFoundError。
+        "--collect-submodules", "easysub_helper",
         "--collect-submodules", "soundcard",
     ]
     for _name in sorted(dlls):
@@ -104,6 +133,7 @@ def verify_archive(python_exe, exe_path, dlls):
 
 
 def main(argv=None):
+    soften_streams()
     parser = argparse.ArgumentParser(description="Win7 档打包（带 UCRT 并自校验）")
     parser.add_argument("--arch", default="x64", choices=("x64", "x86"))
     parser.add_argument("--dry-run", action="store_true", help="只打印命令，不真的打包")

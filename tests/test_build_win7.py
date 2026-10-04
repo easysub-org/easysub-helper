@@ -7,9 +7,11 @@
 DLL 找错目录），我们只会在用户机器上才知道。
 """
 
+import ast
 import contextlib
 import io
 import os
+import subprocess
 import shutil
 import sys
 import tempfile
@@ -159,3 +161,31 @@ class MainTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LauncherEntryTest(unittest.TestCase):
+    """入口必须是"静态导入"的 launcher.py。
+
+    教训（实测）：把 `easysub_helper/__main__.py` 交给 PyInstaller 时，它看不到运行期的
+    `from . import cli`，打出来的包里没有 easysub_helper 包 —— 一跑就是
+    ModuleNotFoundError: No module named 'easysub_helper.cli'（Linux/macOS/Windows 都一样）。
+    """
+
+    def test_entry_is_the_static_launcher(self):
+        self.assertEqual(bw.ENTRY, "launcher.py")
+        self.assertIn("--collect-submodules", bw.build_command("python", {}))
+        self.assertIn("easysub_helper", bw.build_command("python", {}))
+
+    def test_launcher_runs(self):
+        proc = subprocess.run([sys.executable, os.path.join(ROOT, bw.ENTRY), "--version"],
+                              cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+        self.assertIn(b"easysub-helper", proc.stdout)
+
+    def test_launcher_uses_a_static_import(self):
+        # 用 ast 看**代码**（文档字符串里提到 `from . import cli` 是解释踩过的坑，不算）
+        tree = ast.parse(io.open(os.path.join(ROOT, bw.ENTRY), encoding="utf-8").read())
+        imports = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
+        self.assertIn("easysub_helper.cli", [n.module for n in imports])
+        self.assertEqual([n.level for n in imports if n.level], [],
+                         "入口里不许有相对导入：PyInstaller 的静态分析看不到它们")
