@@ -19,7 +19,10 @@
 
 发完之后 `cla` 工作流会：把你的用户名、姓名、日期与该评论链接写进
 [`signatures/cla.json`](signatures/cla.json)（**签名落库**，所以事后删掉或编辑那条评论不影响记录 ——
-这也是主流 CLA 机器人存签名的原因），并打上 `cla-signed` 标签。**没签之前这个检查会失败**
+这也是主流 CLA 机器人存签名的原因），并打上 `cla-signed` 标签。
+
+> 维护者本人（`@Huchangzhi`）与机器人（`dependabot[bot]`、`github-actions[bot]`）在
+> `cla.yml` 的 **BYPASS 免签名单**里，自己的 PR 不会被要求签 CLA；换人维护时记得更新那份名单。**没签之前这个检查会失败**
 （`cla-pending`），如果仓库开了分支保护并把 `CLA` 设为必需状态检查，PR 就无法合并。
 
 不想签也完全没问题 —— 那这个 PR 里的**代码**没法合并，但欢迎提 issue 讨论思路。
