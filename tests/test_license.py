@@ -31,10 +31,15 @@ class LicenseTest(unittest.TestCase):
         self.assertEqual(config.LICENSE_ID, "AGPL-3.0-or-later")
 
     def test_every_source_file_has_an_spdx_header(self):
+        """**整仓**的 .py 都要有 SPDX 头（含 tools/ 打包脚本、tests/、根目录入口 launcher.py）。
+
+        为什么扩到整仓：打包入口、构建脚本也是"分发出去的一部分"，漏了它们就等于漏了署名。
+        """
         missing = []
         needle = "SPDX-License-Identifier: %s" % config.LICENSE_ID
-        for base, dirs, files in os.walk(os.path.join(ROOT, "easysub_helper")):
-            dirs[:] = [d for d in dirs if d != "__pycache__"]
+        skip_dirs = {".venv", "__pycache__", "build", "dist", "release-assets"}
+        for base, dirs, files in os.walk(ROOT):
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
             for name in sorted(files):
                 if not name.endswith(".py"):
                     continue
