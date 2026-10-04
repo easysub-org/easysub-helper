@@ -8,6 +8,14 @@ on:
   pull_request:
   workflow_dispatch:
 
+# 同一分支的旧运行没意义了，直接取消（省 runner 分钟，也让状态更快收敛）
+concurrency:
+  group: helper-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test (py${{ matrix.python }} / ${{ matrix.os }})
@@ -16,12 +24,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, python: "3.6", extras: "" }          # 最老档
-          - { os: ubuntu-latest, python: "3.7", extras: "" }
-          - { os: ubuntu-latest, python: "3.8", extras: "[capture]" } # Win7 同代解释器
+          # 说明：GitHub 托管 runner 已不再提供 **3.6 / 3.7**（ubuntu-24.04 的 setup-python 清单里
+          # 没有这两个版本，而唯一还带它们的 ubuntu-20.04 镜像已下线），windows-2019 镜像同样下线。
+          # 所以"老解释器"这条由两道来守：
+          #   1) tests/test_py36_compat.py —— 在**任意** Python 上用 ast 卡 3.6 语法 + 扫 3.6 之后
+          #      才有的 API（dataclass / asyncio.run / capture_output= / removeprefix / 海象 …），
+          #      每个 job 都会跑，所以 3.6 兼容性并没有失去覆盖；
+          #   2) py3.8 是"最后一个支持 Win7 的 CPython"，也正是发布档用的解释器。
+          # 想在真 3.6 解释器里跑完整套件的话，只能自建 runner 或本地用 pyenv —— 托管 runner 做不到。
+          - { os: ubuntu-22.04, python: "3.8", extras: "[capture]" }   # Win7 同代解释器
           - { os: ubuntu-latest, python: "3.12", extras: "[capture,quality]" }
-          - { os: windows-2019, python: "3.8", extras: "[capture]" }  # Win7 发布档
-          - { os: windows-2019, python: "3.12", extras: "[capture,quality]" }
+          - { os: windows-2022, python: "3.8", extras: "[capture]" }   # Win7 发布档
+          - { os: windows-latest, python: "3.12", extras: "[capture,quality]" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,12 +49,14 @@ jobs:
       - name: Unit tests（无需音频设备）
         shell: bash
         run: python -m unittest discover -s tests -t . -v
-      - name: CLI 冒烟
+      - name: 冒烟（只跑真实存在的入口）
         shell: bash
         run: |
+          # 注意：助手**没有子命令**（用户路径是那个窗口；`pair` / `devices` 这类子命令已删）。
+          # 这里只验证包能导入、入口能起来、参数解析没问题。
           python -m easysub_helper --version
-          python -m easysub_helper --lang en pair || true
-          python -m easysub_helper devices --json | head -20 || true
+          python -m easysub_helper --help
+          python -c "import easysub_helper, easysub_helper.gui, easysub_helper.net, easysub_helper.audio; print('imports ok')"
 
   package-macos:
     name: package (macOS)
@@ -70,7 +86,7 @@ jobs:
 
   package-win7:
     name: package (Win7 / py3.8)
-    runs-on: windows-2019
+    runs-on: windows-2022
     needs: test
     steps:
       - uses: actions/checkout@v4
@@ -83,6 +99,8 @@ jobs:
           python -m pip install -e ".[capture]"
           # 说明：助手不托管 Web 产物、也不碰模型，产物是自包含的（双击即弹窗口）。
           # 这条用于验证 Win7 上能否启动；Linux 发行包要显式声明 python3-tk 依赖。
+          # 注意：这里在 Server 2022 上构建，产物**仍需在 Win7 真机验证一次**
+          # （PyInstaller 的 bootloader 可能用到 Win7 没有的新 API）。
           # 图标用插件 logo 生成的 easysub.ico（与扩展图标同源）；
           # assets 必须显式 add-data：onefile 模式不会自动带上包内数据文件。
           # --noconsole：Windows 上不弹黑框（默认入口是窗口）
