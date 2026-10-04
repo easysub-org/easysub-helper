@@ -14,6 +14,34 @@ import os
 import re
 import sys
 
+
+def _soften_console_encoding():
+    """stdout/stderr 在"编码不了"时不崩（与 cli._soften_console_encoding 同一套）。
+
+    为什么这里也要：CI 的 Windows runner 上 stdout 是 cp1252，用法提示里的中文
+    （"用法：…三段数字"）一 print 就 UnicodeEncodeError → 测试 ERROR（实测踩过）。
+    tools/ 下独立脚本不能 import easysub_helper（打包外运行），所以复制一小份。
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            try:
+                setattr(sys, name, open(os.devnull, "w", encoding="utf-8", errors="replace"))
+            except OSError:
+                pass
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+                continue
+            except (ValueError, OSError):
+                pass
+        try:
+            setattr(sys, name, io.TextIOWrapper(stream.buffer, encoding="utf-8", errors="replace"))
+        except (AttributeError, ValueError, OSError):
+            pass
+
 #: `__version__ = "…"` 的赋值行
 _INIT_RE = re.compile(r'(__version__\s*=\s*)"[^"]*"')
 #: pyproject 的 `version = "…"`（只盖 [project] 里那一行；匹配行首，避免误伤别的键）
@@ -43,6 +71,7 @@ def stamp_in(root, version):
 
 
 def main(argv):
+    _soften_console_encoding()
     # 只接受 x.y[.z…] 且至少三段（发版号不该有 "1.2" 这种残缺写法）；多余参数直接拒绝，
     # 不然 "1.2 3" 这类手滑会被当成正常输入（复审就真踩过一次）
     if len(argv) != 2 or not re.match(r"^\d+\.\d+\.\d+$", argv[1] or ""):
