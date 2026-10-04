@@ -88,6 +88,9 @@ jobs:
           # 真要迁 onedir/.app 需要一并改产物路径与冒烟（见 README「未实测」清单）。
           python -m pip install "pyinstaller>=6.0,<7"
           python -m pip install -e ".[capture]"
+      - name: 把 Release 版本号打进源码（__version__ / pyproject）
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+        run: python tools/stamp_version.py "${{ github.event.inputs.version }}"
       - name: Build onefile binary
         run: |
           # 入口必须是 launcher.py（静态导入）；用 easysub_helper/__main__.py 时 PyInstaller
@@ -126,7 +129,9 @@ jobs:
         run: python tools/stamp_version.py "${{ github.event.inputs.version }}"
       - name: Build onefile app
         run: |
-          python -m pip install --upgrade pip setuptools wheel pyinstaller
+          python -m pip install --upgrade pip setuptools wheel
+          # onefile+windowed 在 6.x 已弃用（v7 会报错），先钉 6.x；迁 onedir/.app 需要一并改产物与冒烟
+          python -m pip install "pyinstaller>=6.0,<7"
           # 刻意不带 `quality`：soxr 是 LGPL-2.1-or-later，塞进 PyInstaller 单文件会让
           # "用户可替换该库"这条义务落空。重采样有内置 polyphase FIR 兜底，音质差别很小。
           python -m pip install -e ".[capture]"
@@ -160,6 +165,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.8" }
+      - name: 把 Release 版本号打进源码（__version__ / pyproject）
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+        run: python tools/stamp_version.py "${{ github.event.inputs.version }}"
       - name: Build onefile exe（带 UCRT，未打补丁的 Win7 也能起）
         shell: bash
         run: |

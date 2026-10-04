@@ -29,6 +29,7 @@
 
 import asyncio
 import logging
+import socket
 import time
 
 from aiohttp import web
@@ -157,11 +158,32 @@ class HelperServer(object):
                 last_err = exc
                 continue
             self.port = candidate
-            # --port 0 时这里拿到的是请求值 0；真实绑定端口要从 site 上回读，
-            # 否则横幅/快照/base_url 都会说谎（说自己在 0 端口）
-            bound = getattr(site, "_bound_port", None) or getattr(site, "port", None)
-            if isinstance(bound, int) and bound > 0 and candidate == 0:
-                self.port = bound
+            # --port 0：请求端口(0)与真实绑定端口不同，横幅/快照/base_url 不许谎报。
+            # 不用 TCPSite 的私有属性（跨 aiohttp 版本不稳，py3.8 的 3.10 上实测拿不到），
+            # 直接从 runner 的监听套接字回读——getsockname 是标准库语义，版本无关。
+            if candidate == 0:
+                for source in (getattr(site, "_server", None) and site._server.sockets,
+                               getattr(self._runner, "addresses", None),
+                               getattr(self._runner, "sockets", None)):
+                    if not source:
+                        continue
+                    try:
+                        items = list(source)
+                    except TypeError:
+                        continue
+                    for item in items:
+                        getsockname = getattr(item, "getsockname", None)
+                        if getsockname is None:
+                            continue            # addresses 里可能是字符串，跳过
+                        try:
+                            port = getsockname()[1]
+                        except (OSError, IndexError):
+                            continue
+                        if port:
+                            self.port = port
+                            break
+                    if self.port:
+                        break
             self.started_at = time.monotonic()
             LOG.info(t("log.listening", url=self.base_url))
             return candidate
@@ -569,6 +591,8 @@ class HelperServer(object):
         # 先记日志，再把「上报错误 + 清会话」丢回事件循环执行（复用既有的跨线程桥）。
         LOG.warning(t("log.captureFailed", error=exc))
         self.last_error = str(exc)
+        session = self._session
+        self._error_session_id = id(session) if session is not None else None
         loop = self._loop
         if loop is None or loop.is_closed():
             self._session = None            # 循环没了：只能就地收尾（进程多半在退出）
@@ -578,7 +602,13 @@ class HelperServer(object):
     def _finish_capture_error_on_loop(self, exc):
         self._emit_from_thread(("json", protocol.error(
             protocol.ERR_CAPTURE_FAILED, t("server.err.captureAborted", detail=str(exc)), True)))
-        self._session = None
+        # 这里执行时用户可能已经重新 start_capture 出了**新会话**（排队期间点开始），
+        # 只清"还是出错的那个"——拿 session 生成序号对比，别把新会话误杀
+        session = self._session
+        # 只清"出错的那个会话"：如果排队期间用户已经 start_capture 出了新会话
+        # （对象不同 → id 不同），绝不能把新会话误杀
+        if session is not None and id(session) == getattr(self, "_error_session_id", None):
+            self._session = None
         self._emit_from_thread(("json", self._state_msg()))
 
     # ---------------- WebSocket ----------------

@@ -322,6 +322,23 @@ class HttpTest(ServerCase):
 
         self.with_server(body, port=0, scan_ports=False)
 
+    def test_ws_connection_cap_returns_503(self):
+        """WS 连接数上限：第 limit+1 条连接必须 503，不能让失控页面吃满内存。"""
+        async def body(session):
+            self.server.WS_MAX_CONNECTIONS = 1
+            token = (await (await session.post(self.base + "/api/pair",
+                                               json={"code": self.code},
+                                               headers={"Origin": self.origin})).json())["token"]
+            async with session.ws_connect(self.base + "/ws?token=" + token) as first:
+                self.assertEqual((await first.receive_json())["type"], "hello")
+                # 第二条连接应被 503 拒绝（握手阶段）
+                with self.assertRaises(aiohttp.WSServerHandshakeError) as ctx:
+                    async with session.ws_connect(self.base + "/ws?token=" + token):
+                        pass
+                self.assertEqual(ctx.exception.status, 503)
+
+        self.with_server(body, user_on=True)
+
     def test_non_ascii_pair_code_is_bad_code_and_counts_toward_lockout(self):
         """非 ASCII 配对码以前会 500 且**不计入限速**（compare_digest 抛 TypeError）→ 现在必须是干净的 bad_code。"""
         async def body(session):
