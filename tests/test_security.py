@@ -97,3 +97,22 @@ class ExtensionOriginTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_origin_ok_wildcard_extra(self):
+        """`--allow-origin *`：extra 里的字面量 `*` 放行任意 Origin。
+
+        助手只监听 127.0.0.1、配对码是唯一凭据，所以外部网页能做的最多是烧配对尝试
+        （触发全局锁定）。这是 Web 版部署在别的域名/https 预览站时的省事开关。
+        """
+        origin = "https://easysub-preview.example.com"
+        # 默认必须关：非回环、非扩展、不在白名单 → 拒绝
+        self.assertFalse(security.origin_ok(origin, 8790))
+        self.assertFalse(security.origin_ok(origin, 8790, extra=()))
+        self.assertFalse(security.origin_ok(origin, 8790, extra=["https://other.example"]))
+        # 显式 '*' → 放行
+        self.assertTrue(security.origin_ok(origin, 8790, extra=["*"]))
+        # '*' 不掩盖回环/扩展的既有判定
+        self.assertTrue(security.origin_ok("http://127.0.0.1:5173", 8790, extra=["*"]))
+        self.assertTrue(security.origin_ok("chrome-extension://abc", 8790, extra=["*"]))
+        # 空 Origin 仍然拒绝（缺 Origin 走 allow_no_origin 那条独立开关）
+        self.assertFalse(security.origin_ok("", 8790, extra=["*"]))

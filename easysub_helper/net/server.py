@@ -76,7 +76,8 @@ class HelperServer(object):
     def __init__(self, pairing, port, host=config.DEFAULT_HOST,
                  default_source="system", backend="auto", device=None,
                  frame_ms=config.FRAME_MS, rate=config.TARGET_RATE,
-                 allow_origins=(), allow_no_origin=False, scan_ports=True,
+                 allow_origins=(), allow_no_origin=False, allow_cors_all=False,
+                 scan_ports=True,
                  version="0.0.0", fixed_token=None, user_on=False):
         self.pairing = pairing
         self.fixed_token = fixed_token       # 仅调试/测试：跳过配对码校验
@@ -89,6 +90,9 @@ class HelperServer(object):
         self.rate = int(rate)
         self.allow_origins = tuple(allow_origins or ())
         self.allow_no_origin = bool(allow_no_origin)
+        #: CORS 全放行：任意 Origin 都回 CORS 头（Web 版部署在别的域名/https 预览站用）。
+        # 安全前提：助手只监听 127.0.0.1，配对码是唯一凭据——外部网页拿不到音频。
+        self.allow_cors_all = bool(allow_cors_all)
         self.scan_ports = bool(scan_ports)
         self.version = version
         #: 窗口「启动 / 暂停」总开关。默认关：不按启动，谁也不会被采集。
@@ -251,6 +255,8 @@ class HelperServer(object):
         return self.pairing.token_valid(token)
 
     def _origin_allowed(self, origin, allow_missing=False):
+        if self.allow_cors_all and origin:
+            return True
         return security.origin_ok_or_missing(
             origin, self.port, self.allow_origins,
             self.allow_no_origin or allow_missing,

@@ -97,6 +97,8 @@ Linux 上装 tkinter：`sudo apt install python3-tk`（Debian/Ubuntu）、
 --backend …             auto / soundcard / parec / pw-record / mac-system
 --device <子串>         指定设备（如 "Monitor of ..."）
 --allow-origin <Origin> 额外放行的 Origin（Web 版部署在别的域名时用），可重复
+--allow-cors-all        CORS 全放行：任意 Origin 都回 CORS 头（Web 版部署在域名/https
+                        预览站时用它最省事，等价于 --allow-origin '*'）
 --token <固定令牌>      跳过配对（仅调试/测试）
 --lang zh_CN|en         界面语言；也可以点窗口里的语言按钮（选择会记住）
 --log-level DEBUG|INFO|WARNING|ERROR
@@ -126,7 +128,9 @@ Linux 上装 tkinter：`sudo apt install python3-tk`（Debian/Ubuntu）、
   扩展协议（`chrome-extension://` / `moz-extension://` / `safari-web-extension://`）。
   端口刻意不校验 —— Web 版可能跑在任意开发端口（vite 5173、serve-web 3000…），
   而真正的凭据是配对码；"必须与助手同端口"会把正常用户挡在门外（实测现象：dist-web 起来后
-  页面里根本看不到这个音源）。非回环来源（部署在别的域名）仍需 `--allow-origin https://…`。
+   页面里根本看不到这个音源）。非回环来源（部署在别的域名）默认拒绝，需显式放行：**CORS 全放行**
+开关 `--allow-cors-all`（等价于 `--allow-origin '*'`）最省事 —— 助手只监听 127.0.0.1，
+令牌仍要靠配对码换取，放行的是 Origin 白名单、**不是鉴权**；外部网页的上限是用错码触发限速。
 - **默认只绑回环地址**，`--host` 传非回环必须显式 `--allow-lan`。
 
 ---
@@ -264,7 +268,7 @@ python tools/make_icons.py --source /path/to/easysub
 | Linux 上没有系统音频 | 确认 PulseAudio/PipeWire 在跑；`--device "Monitor of ..."` 可手选设备 |
 | macOS 上没有系统音频 | 14.2+ 装 `pysysaudio`（免驱动）；否则装 BlackHole 再 `--device` 指定 |
 | 端口被占 | 默认自动向后顺延 20 个（窗口与页面都会用实际端口）；`--port` 可指定 |
-| Web 版（非扩展）连不上 | 本机任意端口的页面默认放行；**部署在别的域名（含 https 预览站）时**，助手要加 `--allow-origin https://你的域名` 才会回 CORS 头，否则浏览器把响应整个拦掉（控制台见 CORS 报错）。另注意：① https 页面连 `http://127.0.0.1` 在部分浏览器可能再被当 mixed content 拦（Chrome 对 localhost 网段有豁免，Firefox/Safari 未必）；② 助手没启动/被 CORS 拦时页面**不会报错**——按产品决定该音源就是"静音继续识别"，判断依据是面板里没有整机声音 |
+| Web 版（非扩展）连不上 | 本机任意端口的页面默认放行；**部署在别的域名（含 https 预览站）时**，助手要加 `--allow-cors-all`（或 `--allow-origin https://你的域名`）才会回 CORS 头，否则浏览器把响应整个拦掉（控制台见 CORS 报错）。另注意：① https 页面连 `http://127.0.0.1` 在部分浏览器可能再被当 mixed content 拦（Chrome 对 localhost 网段有豁免，Firefox/Safari 未必）；② 助手没启动/被 CORS 拦时页面**不会报错**——按产品决定该音源就是"静音继续识别"，判断依据是面板里没有整机声音 |
 | 麦克风选错了 | 窗口里换「设备」下拉（默认「系统默认」跟着系统走）；换音源会重置为系统默认。**状态行副标题显示后端实际打开的设备**，可以据此确认切换生效 |
 | 换了麦克风但声音没变 | 现在不会发生了：设备名解析不出就报错并退回原设备（`parec` 未知设备名会静默回落默认源，这是旧版本的坑） |
 

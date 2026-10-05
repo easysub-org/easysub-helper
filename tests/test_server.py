@@ -266,6 +266,39 @@ class HttpTest(ServerCase):
 
         self.with_server(body)
 
+    def test_pairs_from_any_origin_when_cors_all(self):
+        """`allow_cors_all` 下任意 Origin 都能配对：这是 Web 版部署在别的域名时
+        要的效果（前置判断已由它自己 user-evidence 完成 = 用户在助手点对top湧码）。
+
+        安全前提不变：令牌仍然是配对码换来的 —— 放行的是 Origin 白名单，不是鉴权。
+        """
+        self.server.allow_cors_all = True
+        origin = "https://easysub-preview.example.com"
+
+        async def body(session):
+            async with session.post(self.base + "/api/pair", json={"code": self.code},
+                                    headers={"Origin": origin}) as resp:
+                self.assertEqual(resp.status, 200)
+                data = await resp.json()
+                self.assertIn("token", data)
+                self.assertEqual(resp.headers.get("Access-Control-Allow-Origin"), origin)
+            self.assertEqual(self.pairing.state()["devices"], 1)
+
+        self.with_server(body)
+
+    def test_pair_info_omits_cors_unless_origin_allowed(self):
+        """未放行的来源拿不到 CORS 头（浏览器会拦掉响应）—— 白名单才是防线。"""
+        async def body(session):
+            async with session.get(self.base + "/api/pair/info",
+                                   headers={"Origin": "https://easysub-preview.example.com"}) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertIsNone(resp.headers.get("Access-Control-Allow-Origin"))
+            async with session.get(self.base + "/api/pair/info",
+                                   headers={"Origin": self.base}) as resp:
+                self.assertEqual(resp.headers.get("Access-Control-Allow-Origin"), self.base)
+
+        self.with_server(body)
+
     def test_pair_rejects_missing_origin_unless_allowed(self):
         """没有 Origin（curl/脚本）默认拒绝；显式 allow_no_origin 才放行。"""
         async def body(session):
