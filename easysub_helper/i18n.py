@@ -55,6 +55,7 @@ _STRINGS = {
         "cli.help.corsall": "CORS 全放行（任意 Origin 都回 CORS 头）：助手只监听 127.0.0.1，配对码是唯一凭据，外部网页最多用错码触发限速。Web 版部署在别的域名/https 预览站时用它最省事",
         "cli.help.selftest": "自检：检查冻结产物里的 tkinter / 资源 / 重采样 / 本机 HTTP+WS 环路，全通过退出码 0（打包作业用）",
         "cli.help.requiretkinter": "配合 --selftest：把「无头环境缺 tkinter」也算失败。打包冒烟用它确认**产物**真的带 tkinter",
+        "cli.err.requiretkinterNeedsSelftest": "ERROR: --require-tkinter 必须和 --selftest 一起用（它只是把自检里的 tkinter 提醒升级成失败）。",
 
         # ---- 无窗口模式下的启动横幅 ----
         "run.banner.port": "端口     : {port}",
@@ -209,6 +210,7 @@ _STRINGS = {
         "cli.help.corsall": "allow CORS from any Origin: the helper only listens on 127.0.0.1 and the pair code is the only credential, so the worst an external page can do is burn pairing attempts. Easiest option for a web build deployed on another domain / an https preview site",
         "cli.help.selftest": "self-check the frozen build (tkinter, assets, resampler, loopback HTTP+WS round trip); exits 0 only if everything passes (used by the packaging jobs)",
         "cli.help.requiretkinter": "with --selftest: also fail when tkinter is missing in a headless environment. The packaging smoke uses it to prove the *artifact* really bundles tkinter",
+        "cli.err.requiretkinterNeedsSelftest": "ERROR: --require-tkinter only makes sense together with --selftest (it upgrades the tkinter warning into a failure).",
 
         # ---- 无窗口模式下的启动横幅 ----
         "run.banner.port": "Port     : {port}",

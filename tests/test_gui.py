@@ -229,10 +229,13 @@ class WindowTest(WindowCase):
     def test_window_icon_is_loaded_from_assets(self):
         """窗口/任务栏图标必须来自 assets 里的 easysub 图标。
 
-        钉两件事：① icon128.png 被加载成 PhotoImage；② 那个引用被留在 self._window_icon 上
-        —— Tk 不持有 Python 对象的引用，被 GC 回收后图标会悄悄变回默认羽毛。
-        坑（独立审查抓的）：不能因为"没设上图标"就 skip —— 那正好把这条要抓的回归放过。
-        只有**当前 Tk 真的不支持 PNG**（自己试一次 PhotoImage 就失败）时才跳过。
+        **按平台**断言实际走的分支（独立审查抓到：Windows 上 ico 成功时刻意不设 PNG，
+        无条件要求 `_window_icon` 会让这条在 Windows 上假红）：
+          * Windows → `_window_icon_kind == "ico"`（.ico 才是任务栏/Alt-Tab 认的那份）；
+          * 其它平台 → `"png"` 且 PhotoImage 引用被留住（Tk 不持有 Python 引用，
+            被 GC 回收后图标会悄悄变回默认羽毛）。
+        只有**当前 Tk 真的不支持 PNG**（自己试一次 PhotoImage 就失败）时才跳过——
+        不能因为"图标没设上"跳过，那正是这条要抓的回归。
         """
         path = os.path.join(gui.assets_dir(), "icon128.png")
         if not os.path.exists(path):
@@ -242,13 +245,22 @@ class WindowTest(WindowCase):
 
             probe = PhotoImage(file=path)               # 有 PNG 支持才会成功
         except Exception as exc:                        # noqa: BLE001
-            self.skipTest("当前 Tk 不支持 PNG 图标：%s" % exc)
-        self.assertGreater(int(probe.width()), 0)
+            probe = None
+            if not config.is_windows():
+                self.skipTest("当前 Tk 不支持 PNG 图标：%s" % exc)
+        if probe is not None:
+            self.assertGreater(int(probe.width()), 0)
 
-        icon = getattr(self.window, "_window_icon", None)
-        self.assertIsNotNone(icon, "_set_window_icon 没生效（窗口图标仍是 Tk 默认羽毛）")
-        self.assertIsNot(icon, probe)
-        self.assertGreater(int(icon.width()), 0)
+        kind = getattr(self.window, "_window_icon_kind", None)
+        if config.is_windows():
+            # Windows 走 .ico；万一 iconbitmap 失败（老 Tcl/Tk）则回落 PNG，两者都算设上了
+            self.assertIn(kind, ("ico", "png"),
+                          "Windows 上必须设上窗口图标（.ico，或失败时回落 PNG）")
+        else:
+            self.assertEqual(kind, "png", "非 Windows 应走 iconphoto(PNG)")
+            icon = getattr(self.window, "_window_icon", None)
+            self.assertIsNotNone(icon, "_set_window_icon 没设上图标（窗口图标仍是 Tk 默认羽毛）")
+            self.assertGreater(int(icon.width()), 0)
 
     # ---- 配对码（用户就是来抄这串字符的）----
     def test_pair_code_is_shown_in_the_window(self):

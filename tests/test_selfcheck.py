@@ -56,11 +56,20 @@ class ResultTest(unittest.TestCase):
 class DefaultChecksTest(unittest.TestCase):
     """默认四项必须过——它们就是打包作业唯一的"包没坏"证据。
 
-    唯一的例外是 tkinter：CI 的**单元测试**环境里没装它（setup-python 的 Linux CPython 不带
-    tkinter，GUI 测试那一步也因此整批 skip）。环境缺它不能算代码坏了，所以这里在有 tkinter
-    时严格断言、没有时只要求"该检查被如实报告出来"；真正的失败路径由下面
-    test_missing_tkinter_is_reported 用注入的方式覆盖（与环境无关）。
+    环境说明（独立审查纠正过我的错误描述）：CI 的 runner **是有 tkinter 的**——
+    两个 ubuntu 作业的 xvfb GUI 步骤都实跑 `Ran 32 tests … OK`（无 skip）。单元测试步骤里
+    GUI 用例被跳过只是因为没开 `EASYSUB_HELPER_GUI_TESTS`；而**无 DISPLAY** 会让
+    `gui.tkinter_module()` 返回 None，这才是当初那次假失败的根源（现在 `check_tkinter`
+    直接 import，与显示无关）。本类因此对"环境没有 tkinter"保持严格：真缺 tkinter 就是失败，
+    这正是打包作业要抓的。
     """
+
+    def test_default_checks_include_the_names_require_tkinter_matches(self):
+        """`--require-tkinter` 靠检查项**名字**匹配（selfcheck.main 里的 "tkinter"）：
+        改名字会让那个开关静默失效，所以这里把名字钉住。"""
+        names = [name for name, _ in selfcheck.default_checks()]
+        self.assertIn("tkinter", names)
+        self.assertEqual(len(names), len(set(names)), "检查项名字不能重复")
 
     def test_all_default_checks_pass(self):
         out = io.StringIO()
@@ -120,7 +129,32 @@ class DefaultChecksTest(unittest.TestCase):
         code = selfcheck.main(checks=[("warny", warn_check)], out=out)
         self.assertEqual(code, 0)
         self.assertIn("[warn] warny", out.getvalue())
-        self.assertIn("selftest OK (1 checks)", out.getvalue())
+        # 末行必须带上 warning 计数：只看最后一行的 CI 读者不该漏掉中间那几行提醒
+        self.assertIn("selftest OK (1 checks, 1 warning)", out.getvalue())
+
+    def test_cli_wires_require_tkinter_into_the_selftest(self):
+        """CLI 接线单测（独立审查指出的覆盖盲区）：三平台产物都真带 tkinter，所以
+        "忘了把 --require-tkinter 传给 selfcheck.main" 这类回归 CI 不会红，只能靠这条。"""
+        from unittest import mock
+
+        from easysub_helper import cli
+
+        seen = []
+
+        def fake_main(checks=None, out=None, require_tkinter=False):
+            seen.append(require_tkinter)
+            return 0
+
+        with mock.patch("easysub_helper.selfcheck.main", side_effect=fake_main):
+            self.assertEqual(cli.main(["--selftest"]), 0)
+            self.assertEqual(cli.main(["--selftest", "--require-tkinter"]), 0)
+        self.assertEqual(seen, [False, True], "--require-tkinter 没有传进 selfcheck.main")
+
+    def test_require_tkinter_without_selftest_is_an_error(self):
+        """单独给 --require-tkinter 不能被静默忽略（会让 CI 误以为"验过 tkinter 了"）。"""
+        from easysub_helper import cli
+
+        self.assertEqual(cli.main(["--require-tkinter"]), 2)
 
     def test_require_tkinter_turns_the_warning_into_a_failure(self):
         """打包冒烟用 --require-tkinter 时，"无头环境缺 tkinter"必须变红。

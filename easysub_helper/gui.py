@@ -286,12 +286,16 @@ class HelperWindow(object):
         base = assets_dir()
         ico = os.path.join(base, "easysub.ico")
         png = os.path.join(base, "icon128.png")
+        #: 记下实际走了哪个分支（"ico" / "png" / None）——测试要按平台断言，而不是无条件
+        #: 要求 `_window_icon` 存在：Windows 上 ico 成功时**刻意**不设 PNG（见下）。
+        self._window_icon_kind = None
         ico_done = False
         if config.is_windows() and os.path.exists(ico):
             for call in (lambda: self.root.iconbitmap(default=ico), lambda: self.root.iconbitmap(ico)):
                 try:
                     call()
                     ico_done = True
+                    self._window_icon_kind = "ico"
                     break
                 except Exception:  # noqa: BLE001 - 个别 Tcl/Tk 版本不吃 default 关键字
                     continue
@@ -304,6 +308,7 @@ class HelperWindow(object):
 
                 image = PhotoImage(file=png)
                 self._window_icon = image            # 留引用，防 GC（见 docstring）
+                self._window_icon_kind = "png"
                 self.root.iconphoto(True, image)     # True = 之后所有 Toplevel 都继承
             except Exception:  # noqa: BLE001 - 没有 PNG 支持/图坏了：退回默认图标
                 pass

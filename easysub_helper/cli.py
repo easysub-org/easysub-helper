@@ -274,6 +274,11 @@ def main(argv=None):
         from . import selfcheck
 
         return selfcheck.main(require_tkinter=args.require_tkinter)
+    if args.require_tkinter:
+        # 坑（独立审查建议）：单独给 --require-tkinter 会被静默忽略 —— 有人把它挂到别的
+        # CI 命令上就会误以为"验过 tkinter 了"。这类"看着生效其实没生效"的开关必须响。
+        _eprint(t("cli.err.requiretkinterNeedsSelftest"))
+        return 2
     if not security.is_loopback_host(args.host) and not args.allow_lan:
         _eprint(t("run.err.hostNotLoopback", host=args.host))
         return 2
