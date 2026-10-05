@@ -262,6 +262,13 @@ class WindowTest(WindowCase):
 
         if config.is_windows():
             self.skipTest("Windows 走 iconbitmap(.ico)，不调用 iconphoto")
+        # 与姐妹用例同样的守卫：Tk 没有 PNG 支持时 iconphoto 根本到不了（会假红而非跳过）
+        try:
+            from tkinter import PhotoImage
+
+            PhotoImage(file=os.path.join(gui.assets_dir(), "icon128.png"))
+        except Exception as exc:                        # noqa: BLE001
+            self.skipTest("当前 Tk 不支持 PNG 图标：%s" % exc)
         self.window.__dict__.pop("_window_icon", None)
         calls = []
         with mock.patch.object(self.window.root, "iconphoto",
