@@ -286,15 +286,19 @@ class HelperWindow(object):
         base = assets_dir()
         ico = os.path.join(base, "easysub.ico")
         png = os.path.join(base, "icon128.png")
+        ico_done = False
         if config.is_windows() and os.path.exists(ico):
-            try:
-                self.root.iconbitmap(default=ico)
-            except Exception:  # noqa: BLE001 - 个别 Tcl/Tk 版本不吃 default 关键字
+            for call in (lambda: self.root.iconbitmap(default=ico), lambda: self.root.iconbitmap(ico)):
                 try:
-                    self.root.iconbitmap(ico)
-                except Exception:  # noqa: BLE001
-                    pass
-        if os.path.exists(png):
+                    call()
+                    ico_done = True
+                    break
+                except Exception:  # noqa: BLE001 - 个别 Tcl/Tk 版本不吃 default 关键字
+                    continue
+        # 坑（独立审查提醒）：Windows 上 iconphoto 会再发一次 WM_SETICON，可能把刚设好的 .ico
+        # 盖掉（.ico 才是 Windows 任务栏/Alt-Tab 最认的那份）。所以 Windows 上 ico 成功就不再
+        # 叠加 iconphoto；其它平台（Linux 的 _NET_WM_ICON、macOS 的窗口图标）走 PNG。
+        if os.path.exists(png) and not (config.is_windows() and ico_done):
             try:
                 from tkinter import PhotoImage
 

@@ -40,8 +40,16 @@ class ResultTest(unittest.TestCase):
         self.assertIn("ZeroDivisionError", results[0][2])
 
     def test_emit_tolerates_missing_stdout(self):
-        """--windowed/--noconsole 产物没有 stdout：只看退出码，打印不能炸。"""
-        code = selfcheck.main(checks=[("a", lambda: None)], out=None)
+        """--windowed/--noconsole 产物没有 stdout：只看退出码，打印不能炸。
+
+        坑（独立审查抓的）：不能只传 out=None —— run() 会把它回退成 sys.stdout，
+        于是 `_emit` 的 None 分支根本没被执行（假信心）。这里真的把 sys.stdout 打成 None。
+        """
+        import sys
+        from unittest import mock
+
+        with mock.patch.object(sys, "stdout", None):
+            code = selfcheck.main(checks=[("a", lambda: None)])
         self.assertEqual(code, 0)
 
 

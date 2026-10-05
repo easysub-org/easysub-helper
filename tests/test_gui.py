@@ -231,18 +231,24 @@ class WindowTest(WindowCase):
 
         钉两件事：① icon128.png 被加载成 PhotoImage；② 那个引用被留在 self._window_icon 上
         —— Tk 不持有 Python 对象的引用，被 GC 回收后图标会悄悄变回默认羽毛。
-        当前 Tk 不支持 PNG 图标（老版本）时跳过，不误报。
+        坑（独立审查抓的）：不能因为"没设上图标"就 skip —— 那正好把这条要抓的回归放过。
+        只有**当前 Tk 真的不支持 PNG**（自己试一次 PhotoImage 就失败）时才跳过。
         """
         path = os.path.join(gui.assets_dir(), "icon128.png")
         if not os.path.exists(path):
             self.skipTest("缺少 icon128.png")
+        try:
+            from tkinter import PhotoImage
+
+            probe = PhotoImage(file=path)               # 有 PNG 支持才会成功
+        except Exception as exc:                        # noqa: BLE001
+            self.skipTest("当前 Tk 不支持 PNG 图标：%s" % exc)
+        self.assertGreater(int(probe.width()), 0)
+
         icon = getattr(self.window, "_window_icon", None)
-        if icon is None:
-            self.skipTest("当前 Tk 不支持 iconphoto(PNG)")
+        self.assertIsNotNone(icon, "_set_window_icon 没生效（窗口图标仍是 Tk 默认羽毛）")
+        self.assertIsNot(icon, probe)
         self.assertGreater(int(icon.width()), 0)
-        # 注意：`wm iconphoto` 没有"回读"形式（只接受 window + image…），不能拿它断言。
-        # 这里钉的是"_window_icon 由 _set_window_icon 建出来并留在窗口对象上"——
-        # 少掉这次调用或丢掉引用，属性就不存在/被 GC，这条立刻红。
 
     # ---- 配对码（用户就是来抄这串字符的）----
     def test_pair_code_is_shown_in_the_window(self):
