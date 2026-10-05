@@ -186,6 +186,10 @@ def main(checks=None, out=None, require_tkinter=False):
     的 CPython 都带 tkinter，所以产物里缺它一定是打包漏了，必须红。
     """
     results = run(checks=checks, out=out)
+    # 坑（第四轮审查抓的 major）：`run()` 内部会把 out 回退成 sys.stdout，但这里如果不做同样的
+    # 回退，**CLI/CI 那条唯一路径**（out=None）下汇总行就被 `_emit` 的 `out is None` 直接吞掉 ——
+    # "末行带 warning 计数"这个修复等于只在测试里生效（测试全用 StringIO，覆盖不到）。
+    out = out if out is not None else getattr(sys, "stdout", None)
     failed = [name for name, ok, _ in results if not ok]
     warned = [name for name, ok, detail in results if ok and str(detail).startswith("warn:")]
     if require_tkinter:

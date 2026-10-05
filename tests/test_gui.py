@@ -226,6 +226,28 @@ class WindowCase(unittest.TestCase):
                      "需要 EASYSUB_HELPER_GUI_TESTS=1 且有显示环境")
 class WindowTest(WindowCase):
     # ---- 窗口图标（用户反馈：默认是 Tk 的羽毛，要 easysub 的）----
+    def test_windows_prefers_ico_and_does_not_stack_png(self):
+        """Windows 上 ico 成功时刻意**不再**叠加 iconphoto（后者会再发一次 WM_SETICON 盖掉 .ico）。
+
+        第四轮审查指出这个刻意行为此前没有测试守护：把叠加写回去不会让任何用例变红。
+        这里用"假 is_windows + 假 iconbitmap"在真实 Tk root 上验分支（本机不是 Windows，
+        只能验分支逻辑，验不了真实图标效果）。
+        """
+        from unittest import mock
+
+        from easysub_helper import config as cfg
+
+        calls = []
+        self.window.__dict__.pop("_window_icon", None)          # 清掉构造时留下的 PNG 引用
+        with mock.patch.object(cfg, "is_windows", return_value=True), \
+                mock.patch.object(self.window.root, "iconbitmap",
+                                  side_effect=lambda *a, **k: calls.append(a)):
+            self.window._set_window_icon()
+        self.assertTrue(calls, "Windows 上应先试 iconbitmap(.ico)")
+        self.assertEqual(getattr(self.window, "_window_icon_kind", None), "ico")
+        self.assertNotIn("_window_icon", self.window.__dict__,
+                         "Windows 上 ico 成功后不该再叠加 iconphoto(PNG)")
+
     def test_window_icon_is_loaded_from_assets(self):
         """窗口/任务栏图标必须来自 assets 里的 easysub 图标。
 

@@ -60,8 +60,10 @@ class DefaultChecksTest(unittest.TestCase):
     两个 ubuntu 作业的 xvfb GUI 步骤都实跑 `Ran 32 tests … OK`（无 skip）。单元测试步骤里
     GUI 用例被跳过只是因为没开 `EASYSUB_HELPER_GUI_TESTS`；而**无 DISPLAY** 会让
     `gui.tkinter_module()` 返回 None，这才是当初那次假失败的根源（现在 `check_tkinter`
-    直接 import，与显示无关）。本类因此对"环境没有 tkinter"保持严格：真缺 tkinter 就是失败，
-    这正是打包作业要抓的。
+    直接 import，与显示无关）。
+    严格性的来源要说清楚：本类在**无头 Linux** 上对缺 tkinter 是宽容的（`check_tkinter`
+    抛 `Warn` → ok=True），"产物必须带 tkinter"这条硬要求由**打包作业的 `--require-tkinter`**
+    保证（ci.yml 三处冒烟）。
     """
 
     def test_default_checks_include_the_names_require_tkinter_matches(self):
@@ -120,6 +122,28 @@ class DefaultChecksTest(unittest.TestCase):
             selfcheck.check_tkinter()          # 不抛异常 = 按"模块存在"判定，与显示无关
         finally:
             selfcheck._headless_linux = original
+
+    def test_summary_is_printed_on_the_real_cli_path(self):
+        """汇总行必须出现在**真实路径**上（out=None → sys.stdout）。
+
+        坑（第四轮审查抓的 major）：`run()` 内部会把 out 回退成 sys.stdout，而 `main()` 一度
+        用未回退的 out 调 `_emit` → CLI/CI（唯一真实路径）下汇总行被吞掉，只在测试传 StringIO
+        时可见。这条测试就是为它加的：把 sys.stdout 换成 StringIO，**不传 out**。
+        """
+        import sys
+        from unittest import mock
+
+        buf = io.StringIO()
+        with mock.patch.object(sys, "stdout", buf):
+            code = selfcheck.main(checks=[("a", lambda: None)])
+        self.assertEqual(code, 0)
+        self.assertIn("selftest OK (1 checks)", buf.getvalue())
+
+        buf2 = io.StringIO()
+        with mock.patch.object(sys, "stdout", buf2):
+            code = selfcheck.main(checks=[("bad", lambda: 1 / 0)])
+        self.assertEqual(code, 1)
+        self.assertIn("selftest FAILED (1/1)", buf2.getvalue())
 
     def test_warn_does_not_fail_the_run(self):
         def warn_check():
