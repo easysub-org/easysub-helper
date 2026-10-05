@@ -218,6 +218,7 @@ class HelperWindow(object):
 
         self.root = self.tk.Tk()
         self.root.title(t("gui.title"))
+        self._set_window_icon()
         self.root.minsize(430, 560)
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
         self._setup_style()
@@ -271,6 +272,37 @@ class HelperWindow(object):
             # aqua/vista 不接受自定义配色，只统一字体与内边距，交给系统画
             self.style.configure(ACCENT_STYLE, font=self.font_body_bold, padding=(16, 7))
             self.style.configure("TButton", padding=(10, 5))
+
+    def _set_window_icon(self):
+        """把窗口/任务栏图标换成 easysub 的（默认是 Tk 的羽毛，用户反馈过）。
+
+        跨平台差异都试一遍、失败一律吞掉——图标再好看也不值得让窗口起不来：
+          * Windows：`iconbitmap(default=…)` 认 `.ico`，任务栏与 Alt-Tab 都用它；
+          * Linux/macOS：`iconphoto` + PNG（Tk 8.6 起支持 PNG；Dock 图标由打包时的
+            `--icon easysub.icns` 决定，这里补的是窗口/任务栏那一份）。
+        坑：PhotoImage 必须**留一个引用**——Tk 不持有 Python 对象的引用，被 GC 回收后图标会
+        悄悄变回默认羽毛（与下面的 _logo() 同一套约定）。
+        """
+        base = assets_dir()
+        ico = os.path.join(base, "easysub.ico")
+        png = os.path.join(base, "icon128.png")
+        if config.is_windows() and os.path.exists(ico):
+            try:
+                self.root.iconbitmap(default=ico)
+            except Exception:  # noqa: BLE001 - 个别 Tcl/Tk 版本不吃 default 关键字
+                try:
+                    self.root.iconbitmap(ico)
+                except Exception:  # noqa: BLE001
+                    pass
+        if os.path.exists(png):
+            try:
+                from tkinter import PhotoImage
+
+                image = PhotoImage(file=png)
+                self._window_icon = image            # 留引用，防 GC（见 docstring）
+                self.root.iconphoto(True, image)     # True = 之后所有 Toplevel 都继承
+            except Exception:  # noqa: BLE001 - 没有 PNG 支持/图坏了：退回默认图标
+                pass
 
     def _logo(self):
         """插件 logo（与主项目图标同源，见 tools/make_icons.py）。取不到就退回纯文字标题。"""

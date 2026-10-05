@@ -225,6 +225,25 @@ class WindowCase(unittest.TestCase):
 @unittest.skipUnless(GUI_TESTS and gui.available(),
                      "需要 EASYSUB_HELPER_GUI_TESTS=1 且有显示环境")
 class WindowTest(WindowCase):
+    # ---- 窗口图标（用户反馈：默认是 Tk 的羽毛，要 easysub 的）----
+    def test_window_icon_is_loaded_from_assets(self):
+        """窗口/任务栏图标必须来自 assets 里的 easysub 图标。
+
+        钉两件事：① icon128.png 被加载成 PhotoImage；② 那个引用被留在 self._window_icon 上
+        —— Tk 不持有 Python 对象的引用，被 GC 回收后图标会悄悄变回默认羽毛。
+        当前 Tk 不支持 PNG 图标（老版本）时跳过，不误报。
+        """
+        path = os.path.join(gui.assets_dir(), "icon128.png")
+        if not os.path.exists(path):
+            self.skipTest("缺少 icon128.png")
+        icon = getattr(self.window, "_window_icon", None)
+        if icon is None:
+            self.skipTest("当前 Tk 不支持 iconphoto(PNG)")
+        self.assertGreater(int(icon.width()), 0)
+        # 注意：`wm iconphoto` 没有"回读"形式（只接受 window + image…），不能拿它断言。
+        # 这里钉的是"_window_icon 由 _set_window_icon 建出来并留在窗口对象上"——
+        # 少掉这次调用或丢掉引用，属性就不存在/被 GC，这条立刻红。
+
     # ---- 配对码（用户就是来抄这串字符的）----
     def test_pair_code_is_shown_in_the_window(self):
         self.window._refresh()

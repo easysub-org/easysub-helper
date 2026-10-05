@@ -30,12 +30,39 @@ ASSET_FILES = ("icon128.png", "easysub.ico")
 FRAME_BYTES = 16000 * 20 // 1000 * 4
 
 
+class Warn(Exception):
+    """检查项"在当前环境不适用"：打印提醒但**不算失败**。
+
+    目前只有一个用例：无显示环境的 Linux（CI 打包 runner、无头服务器）上没有 tkinter——
+    那里的产物本来就只能当命令行服务跑，把它判为失败会让打包作业永远红。
+    """
+
+
+def _headless_linux():
+    return (sys.platform.startswith("linux")
+            and not os.environ.get("DISPLAY")
+            and not os.environ.get("WAYLAND_DISPLAY"))
+
+
 def check_tkinter():
-    """tkinter 必须在（--windowed 产物漏了它 → 静默变无窗口常驻）。"""
-    if gui.tkinter_module() is None:
-        raise RuntimeError("tkinter is missing from this build (a --windowed binary would "
-                           "silently fall back to a windowless process)")
-    import tkinter.ttk   # noqa: F401  （只要包壳没有 ttk，窗口一样起不来）
+    """tkinter 必须在（--windowed/--noconsole 产物漏了它 → 静默变无窗口常驻）。
+
+    坑（别用 `gui.tkinter_module()` 判断）：那个函数在**无显示**的 Linux 上也会返回 None
+    ——"起不了窗口"和"包里根本没有 tkinter"是两件事，混在一起会让打包日志给出误导性诊断
+    （本仓第一次加这个检查时就是这么误报的）。这里直接 import 模块本身，与显示无关。
+
+    例外见 `Warn`：无头 Linux（CI 打包 runner、无头服务器）确实没法跑 GUI 产物，
+    模块缺失只提醒；Windows / macOS / 有显示的 Linux 一律失败。
+    """
+    try:
+        import tkinter        # noqa: F401
+        import tkinter.ttk    # noqa: F401  （只有包壳、没有 ttk 时窗口一样起不来）
+    except Exception as exc:
+        detail = "tkinter cannot be imported: %s: %s" % (type(exc).__name__, exc)
+        if _headless_linux():
+            raise Warn(detail + " (headless Linux: this build can only run as a CLI service)")
+        raise RuntimeError(detail + " — a --windowed/--noconsole build would silently fall "
+                                    "back to a windowless process")
 
 
 def check_assets():
@@ -129,7 +156,10 @@ def default_checks():
 
 
 def run(checks=None, out=None):
-    """跑全部检查，返回 [(name, ok, detail)]。checks 可注入（测试用）。"""
+    """跑全部检查，返回 [(name, ok, detail)]。checks 可注入（测试用）。
+
+    `Warn` 表示"环境不适用"：ok 仍为 True，detail 里带 `warn:` 前缀（调用方打印成提醒）。
+    """
     out = out if out is not None else getattr(sys, "stdout", None)
     results = []
     for name, fn in (checks if checks is not None else default_checks()):
@@ -137,6 +167,9 @@ def run(checks=None, out=None):
             fn()
             results.append((name, True, ""))
             _emit(out, "  [ok]   %s" % name)
+        except Warn as exc:
+            results.append((name, True, "warn: %s" % exc))
+            _emit(out, "  [warn] %s - %s" % (name, exc))
         except Exception as exc:                          # noqa: BLE001 - 任何异常都算该项失败
             detail = "%s: %s" % (type(exc).__name__, exc)
             results.append((name, False, detail))

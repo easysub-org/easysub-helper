@@ -46,7 +46,13 @@ class ResultTest(unittest.TestCase):
 
 
 class DefaultChecksTest(unittest.TestCase):
-    """默认四项在本机必须全过——它们就是打包作业唯一的"包没坏"证据。"""
+    """默认四项必须过——它们就是打包作业唯一的"包没坏"证据。
+
+    唯一的例外是 tkinter：CI 的**单元测试**环境里没装它（setup-python 的 Linux CPython 不带
+    tkinter，GUI 测试那一步也因此整批 skip）。环境缺它不能算代码坏了，所以这里在有 tkinter
+    时严格断言、没有时只要求"该检查被如实报告出来"；真正的失败路径由下面
+    test_missing_tkinter_is_reported 用注入的方式覆盖（与环境无关）。
+    """
 
     def test_all_default_checks_pass(self):
         out = io.StringIO()
@@ -56,6 +62,68 @@ class DefaultChecksTest(unittest.TestCase):
         names = [name for name, _, _ in results]
         for expected in ("tkinter", "assets", "resampler", "http+ws round trip"):
             self.assertIn(expected, names)
+
+    def test_missing_tkinter_is_reported(self):
+        """tkinter 检查必须有牙：模拟"模块导不进来"时必须报失败（除非是无头 Linux 的例外）。"""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def fake_import(name, *a, **kw):
+            if name == "tkinter" or name.startswith("tkinter."):
+                raise ImportError("No module named 'tkinter'")
+            return real_import(name, *a, **kw)
+
+        builtins.__import__ = fake_import
+        try:
+            if selfcheck._headless_linux():
+                with self.assertRaises(selfcheck.Warn):
+                    selfcheck.check_tkinter()
+            else:
+                with self.assertRaises(RuntimeError):
+                    selfcheck.check_tkinter()
+        finally:
+            builtins.__import__ = real_import
+
+    def test_tkinter_check_ignores_display(self):
+        """判定必须只看**模块**在不在：无显示≠缺 tkinter（本仓第一次加检查时就误诊过）。
+
+        做法：把"无头判定"强制为 True（等效无 DISPLAY），在 tkinter 可导入的前提下调用
+        check_tkinter()——必须**正常返回**。若哪天有人改回依赖 gui.tkinter_module()（它在无显示
+        Linux 上返回 None），这里会抛 Warn，测试立刻红。
+        """
+        try:
+            import tkinter  # noqa: F401
+        except Exception:
+            self.skipTest("本机没有 tkinter，这条测不了")
+
+        original = selfcheck._headless_linux
+        selfcheck._headless_linux = lambda: True
+        try:
+            selfcheck.check_tkinter()          # 不抛异常 = 按"模块存在"判定，与显示无关
+        finally:
+            selfcheck._headless_linux = original
+
+    def test_warn_does_not_fail_the_run(self):
+        def warn_check():
+            raise selfcheck.Warn("环境不适用")
+
+        out = io.StringIO()
+        code = selfcheck.main(checks=[("warny", warn_check)], out=out)
+        self.assertEqual(code, 0)
+        self.assertIn("[warn] warny", out.getvalue())
+        self.assertIn("selftest OK (1 checks)", out.getvalue())
+
+    def test_missing_assets_are_reported(self):
+        from easysub_helper import gui
+
+        original = gui.assets_dir
+        gui.assets_dir = lambda: None
+        try:
+            with self.assertRaises(RuntimeError):
+                selfcheck.check_assets()
+        finally:
+            gui.assets_dir = original
 
     def test_frame_size_contract(self):
         # 16k 单声道 f32le 20ms = 320 样本 = 1280 字节（页面按这个切帧）
