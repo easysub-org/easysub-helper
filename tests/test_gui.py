@@ -235,8 +235,12 @@ class WindowTest(WindowCase):
         "PhotoImage 必须留引用"，探测也一样：查 patchlevel 就够了，不碰图片对象。
         """
         try:
-            parts = str(self.window.root.tk.call("info", "patchlevel")).split(".")
-            return (int(parts[0]), int(parts[1])) >= (8, 6)
+            raw = str(self.window.root.tk.call("info", "patchlevel"))
+            # 去掉补丁级里的非数字后缀（"8.7a1" / "8.6b1" 这类 beta 版本），否则 int() 会抛
+            # 异常 → 被误判成"不支持 PNG"而 skip，反而掩盖回归（收口核验的 nit A）。
+            digits = ["".join(ch for ch in part if ch.isdigit()) or "0"
+                      for part in raw.split(".")[:2]]
+            return tuple(int(d) for d in digits) >= (8, 6)
         except Exception:                                   # noqa: BLE001
             return False
 
