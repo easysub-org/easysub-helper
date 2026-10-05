@@ -52,6 +52,7 @@ _STRINGS = {
         "cli.help.device": "设备名子串（如 \"Monitor of ...\"）",
         "cli.help.token": "跳过配对，直接用固定设备令牌（仅调试/测试）",
         "cli.help.alloworigin": "额外放行的 Origin（如 Web 版的部署地址），可重复",
+        "cli.help.corsall": "CORS 全放行（任意 Origin 都回 CORS 头）：助手只监听 127.0.0.1，配对码是唯一凭据，外部网页最多用错码触发限速。Web 版部署在别的域名/https 预览站时用它最省事",
 
         # ---- 无窗口模式下的启动横幅 ----
         "run.banner.port": "端口     : {port}",
@@ -202,6 +203,7 @@ _STRINGS = {
         "cli.help.device": "device name substring (e.g. \"Monitor of ...\")",
         "cli.help.token": "skip pairing and use a fixed device token (debugging/testing only)",
         "cli.help.alloworigin": "extra allowed Origin (e.g. a deployed web build), repeatable",
+        "cli.help.corsall": "allow CORS from any Origin: the helper only listens on 127.0.0.1 and the pair code is the only credential, so the worst an external page can do is burn pairing attempts. Easiest option for a web build deployed on another domain / an https preview site",
 
         # ---- 无窗口模式下的启动横幅 ----
         "run.banner.port": "Port     : {port}",

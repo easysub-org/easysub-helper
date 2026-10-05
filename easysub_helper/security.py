@@ -110,7 +110,12 @@ def is_loopback_origin(origin) -> bool:
 
 
 def allowed_origins(port: int, extra=None):
-    """本机页面 + 显式放行的其它来源。"""
+    """本机页面 + 显式放行的其它来源。
+
+    extra 里的字面量 `"*"` 表示放行**任意** Origin（`--allow-origin *`）：
+    仅适用于"助手只监听 127.0.0.1 + 配对码是唯一凭据"的前提——外部网页能做的最多是
+    用错码触发限速（全局锁定，窗口里「换一个」即可解锁），拿不到任何音频。
+    """
     items = [
         "http://127.0.0.1:{}".format(port),
         "http://localhost:{}".format(port),
@@ -137,6 +142,9 @@ def origin_ok(origin, port: int, extra=None, allow_extensions=True) -> bool:
         return True
     if is_loopback_origin(origin):
         return True
+    extra = tuple(extra or ())
+    if "*" in extra:
+        return True                     # 显式放开：任意 Origin（含部署在域名的 Web 版）
     for allowed in allowed_origins(port, extra):
         if safe_compare(origin, allowed):
             return True

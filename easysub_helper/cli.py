@@ -167,6 +167,7 @@ def build_server(args, user_on=False):
         backend=args.backend,
         device=args.device,
         allow_origins=args.allow_origin,
+        allow_cors_all=args.allow_cors_all,
         version=__version__,
         fixed_token=fixed_token,
         user_on=user_on,
@@ -251,6 +252,8 @@ def build_parser():
     parser.add_argument("--token", help=t("cli.help.token"))
     parser.add_argument("--allow-origin", action="append", default=[],
                         help=t("cli.help.alloworigin"))
+    parser.add_argument("--allow-cors-all", action="store_true",
+                        help=t("cli.help.corsall"))
     return parser
 
 
