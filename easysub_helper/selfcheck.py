@@ -177,10 +177,19 @@ def run(checks=None, out=None):
     return results
 
 
-def main(checks=None, out=None):
-    """返回进程退出码：全部通过 0，否则 1。"""
+def main(checks=None, out=None, require_tkinter=False):
+    """返回进程退出码：全部通过 0，否则 1。
+
+    `require_tkinter=True`（`--selftest --require-tkinter`，打包冒烟用）：把 tkinter 那条
+    "无头 Linux 提醒"也当成失败。理由（独立审查指出）：Warn 豁免是为了让没有图形环境的
+    构建机不误报，但打包作业要回答的是"**这个产物**有没有 tkinter"——实测三平台打包 runner
+    的 CPython 都带 tkinter，所以产物里缺它一定是打包漏了，必须红。
+    """
     results = run(checks=checks, out=out)
     failed = [name for name, ok, _ in results if not ok]
+    if require_tkinter:
+        failed += [name for name, ok, detail in results
+                   if ok and name == "tkinter" and str(detail).startswith("warn:")]
     if failed:
         _emit(out, "selftest FAILED (%d/%d): %s" % (len(failed), len(results), ", ".join(failed)))
         return 1

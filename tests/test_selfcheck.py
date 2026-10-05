@@ -122,6 +122,25 @@ class DefaultChecksTest(unittest.TestCase):
         self.assertIn("[warn] warny", out.getvalue())
         self.assertIn("selftest OK (1 checks)", out.getvalue())
 
+    def test_require_tkinter_turns_the_warning_into_a_failure(self):
+        """打包冒烟用 --require-tkinter 时，"无头环境缺 tkinter"必须变红。
+
+        独立审查指出：Warn 豁免是为了让没图形环境的构建机不误报，但打包作业要回答的是
+        "**这个产物**有没有 tkinter"——实测三平台打包 runner 的 CPython 都带 tkinter，
+        所以产物里缺它一定是打包漏了。
+        """
+        def warn_tkinter():
+            raise selfcheck.Warn("headless Linux, tkinter missing")
+
+        strict = io.StringIO()
+        self.assertEqual(selfcheck.main(checks=[("tkinter", warn_tkinter)], out=strict,
+                                        require_tkinter=True), 1)
+        self.assertIn("FAILED", strict.getvalue())
+        # 不带该开关时（本地/单元测试环境）仍然是提醒，不算失败
+        lenient = io.StringIO()
+        self.assertEqual(selfcheck.main(checks=[("tkinter", warn_tkinter)], out=lenient), 0)
+        self.assertIn("[warn]", lenient.getvalue())
+
     def test_missing_assets_are_reported(self):
         from easysub_helper import gui
 

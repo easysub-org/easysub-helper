@@ -99,6 +99,8 @@ Linux 上装 tkinter：`sudo apt install python3-tk`（Debian/Ubuntu）、
 --allow-origin <Origin> 额外放行的 Origin（Web 版部署在别的域名时用），可重复
 --allow-cors-all        CORS 全放行：任意 Origin 都回 CORS 头（Web 版部署在域名/https
                         预览站时用它最省事，等价于 --allow-origin '*'）
+--selftest              自检冻结产物（tkinter / 资源 / 重采样 / 本机 HTTP+WS 环路），全过退出 0
+--require-tkinter       配合 --selftest：无头环境缺 tkinter 也算失败（打包冒烟用，见 ci.yml）
 --token <固定令牌>      跳过配对（仅调试/测试）
 --lang zh_CN|en         界面语言；也可以点窗口里的语言按钮（选择会记住）
 --log-level DEBUG|INFO|WARNING|ERROR

@@ -256,6 +256,8 @@ def build_parser():
                         help=t("cli.help.corsall"))
     parser.add_argument("--selftest", action="store_true",
                         help=t("cli.help.selftest"))
+    parser.add_argument("--require-tkinter", action="store_true",
+                        help=t("cli.help.requiretkinter"))
     return parser
 
 
@@ -271,7 +273,7 @@ def main(argv=None):
         # 必须排在 GUI/服务启动之前：它自己起一个临时服务，跑完就退。
         from . import selfcheck
 
-        return selfcheck.main()
+        return selfcheck.main(require_tkinter=args.require_tkinter)
     if not security.is_loopback_host(args.host) and not args.allow_lan:
         _eprint(t("run.err.hostNotLoopback", host=args.host))
         return 2
