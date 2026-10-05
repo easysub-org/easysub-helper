@@ -226,6 +226,20 @@ class WindowCase(unittest.TestCase):
                      "需要 EASYSUB_HELPER_GUI_TESTS=1 且有显示环境")
 class WindowTest(WindowCase):
     # ---- 窗口图标（用户反馈：默认是 Tk 的羽毛，要 easysub 的）----
+    def _tk_supports_png(self):
+        """Tk 8.6+ 才支持 PNG（iconphoto）。
+
+        坑（CI 实测踩过）：**不要**用"创建一张 PhotoImage 试试"来探测 —— 临时图片对象被 GC 时
+        Tkinter 会在非主线程调 `image delete`，直接 `Tcl_AsyncDelete: async handler deleted by
+        the wrong thread` → core dumped（exit 134），整个 GUI 作业红。仓库里 `_logo()` 早就注明
+        "PhotoImage 必须留引用"，探测也一样：查 patchlevel 就够了，不碰图片对象。
+        """
+        try:
+            parts = str(self.window.root.tk.call("info", "patchlevel")).split(".")
+            return (int(parts[0]), int(parts[1])) >= (8, 6)
+        except Exception:                                   # noqa: BLE001
+            return False
+
     def test_windows_prefers_ico_and_does_not_stack_png(self):
         """Windows 上 ico 成功时刻意**不再**叠加 iconphoto（后者会再发一次 WM_SETICON 盖掉 .ico）。
 
@@ -262,13 +276,8 @@ class WindowTest(WindowCase):
 
         if config.is_windows():
             self.skipTest("Windows 走 iconbitmap(.ico)，不调用 iconphoto")
-        # 与姐妹用例同样的守卫：Tk 没有 PNG 支持时 iconphoto 根本到不了（会假红而非跳过）
-        try:
-            from tkinter import PhotoImage
-
-            PhotoImage(file=os.path.join(gui.assets_dir(), "icon128.png"))
-        except Exception as exc:                        # noqa: BLE001
-            self.skipTest("当前 Tk 不支持 PNG 图标：%s" % exc)
+        if not self._tk_supports_png():
+            self.skipTest("Tk < 8.6：不支持 PNG 图标（iconphoto 到不了）")
         self.window.__dict__.pop("_window_icon", None)
         calls = []
         with mock.patch.object(self.window.root, "iconphoto",
@@ -286,22 +295,15 @@ class WindowTest(WindowCase):
           * Windows → `_window_icon_kind == "ico"`（.ico 才是任务栏/Alt-Tab 认的那份）；
           * 其它平台 → `"png"` 且 PhotoImage 引用被留住（Tk 不持有 Python 引用，
             被 GC 回收后图标会悄悄变回默认羽毛）。
-        只有**当前 Tk 真的不支持 PNG**（自己试一次 PhotoImage 就失败）时才跳过——
-        不能因为"图标没设上"跳过，那正是这条要抓的回归。
+        只有**当前 Tk 真的不支持 PNG**（patchlevel < 8.6）时才跳过——不能因为"图标没设上"跳过，
+        那正是这条要抓的回归。
         """
         path = os.path.join(gui.assets_dir(), "icon128.png")
         if not os.path.exists(path):
             self.skipTest("缺少 icon128.png")
-        try:
-            from tkinter import PhotoImage
-
-            probe = PhotoImage(file=path)               # 有 PNG 支持才会成功
-        except Exception as exc:                        # noqa: BLE001
-            probe = None
-            if not config.is_windows():
-                self.skipTest("当前 Tk 不支持 PNG 图标：%s" % exc)
-        if probe is not None:
-            self.assertGreater(int(probe.width()), 0)
+        if not self._tk_supports_png():
+            self.skipTest("Tk < 8.6：不支持 PNG 图标")
+        # 注意：**不**在这里创建临时 PhotoImage 来探测 —— 见 _tk_supports_png 的坑注释。
 
         kind = getattr(self.window, "_window_icon_kind", None)
         if config.is_windows():
