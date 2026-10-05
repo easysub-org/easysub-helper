@@ -308,8 +308,10 @@ class HelperWindow(object):
 
                 image = PhotoImage(file=png)
                 self.root.iconphoto(True, image)     # True = 之后所有 Toplevel 都继承
-                # 坑（第四轮审查）：`_window_icon_kind` 必须在 **iconphoto 真的调过之后**才记 ——
-                # 先记再调的话，把这行调用删掉也不会让任何测试变红（"图标实际没换上"抓不到）。
+                # 坑（第四轮/第五轮审查）：`_window_icon` 与 `_window_icon_kind` 必须在
+                # **iconphoto 真的调过之后**才记 —— 先记再调的话，"图标实际没换上"（调用被删）
+                # 就不会让任何测试变红；测试另有 test_window_icon_actually_calls_iconphoto
+                # 用 spy 盯住调用本身。
                 self._window_icon = image            # 留引用，防 GC（见 docstring）
                 self._window_icon_kind = "png"
             except Exception:  # noqa: BLE001 - 没有 PNG 支持/图坏了：退回默认图标

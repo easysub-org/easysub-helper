@@ -194,11 +194,12 @@ def main(checks=None, out=None, require_tkinter=False):
     warned = [name for name, ok, detail in results if ok and str(detail).startswith("warn:")]
     if require_tkinter:
         failed += [name for name in warned if name == "tkinter"]
-    if failed:
-        _emit(out, "selftest FAILED (%d/%d): %s" % (len(failed), len(results), ", ".join(failed)))
-        return 1
-    # 末行带上 warning 计数：只看最后一行的 CI 读者不该漏掉中间那几行提醒（独立审查建议）
     suffix = ", %d warning%s" % (len(warned), "" if len(warned) == 1 else "s") if warned else ""
+    if failed:
+        # 失败行也要带 warning 计数：否则"有 warn + 有 fail"时，只看末行的读者仍会漏掉提醒
+        _emit(out, "selftest FAILED (%d/%d)%s: %s"
+              % (len(failed), len(results), suffix, ", ".join(failed)))
+        return 1
     _emit(out, "selftest OK (%d checks%s)" % (len(results), suffix))
     return 0
 

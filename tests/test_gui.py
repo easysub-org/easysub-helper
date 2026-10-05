@@ -241,12 +241,35 @@ class WindowTest(WindowCase):
         self.window.__dict__.pop("_window_icon", None)          # 清掉构造时留下的 PNG 引用
         with mock.patch.object(cfg, "is_windows", return_value=True), \
                 mock.patch.object(self.window.root, "iconbitmap",
-                                  side_effect=lambda *a, **k: calls.append(a)):
+                                  side_effect=lambda *a, **k: calls.append((a, k))):
             self.window._set_window_icon()
         self.assertTrue(calls, "Windows 上应先试 iconbitmap(.ico)")
+        # 断言真的把 easysub.ico 递过去了：调用形式可能是 iconbitmap(default=ico) 或 iconbitmap(ico)
+        wanted = os.path.join(gui.assets_dir(), "easysub.ico")
+        passed = [(a[0] if a else k.get("default")) for a, k in calls]
+        self.assertIn(wanted, passed, "没把 easysub.ico 交给 iconbitmap")
         self.assertEqual(getattr(self.window, "_window_icon_kind", None), "ico")
         self.assertNotIn("_window_icon", self.window.__dict__,
                          "Windows 上 ico 成功后不该再叠加 iconphoto(PNG)")
+
+    def test_window_icon_actually_calls_iconphoto(self):
+        """必须**真的调用** iconphoto —— 只记状态不调用就是"图标没换上"。
+
+        第五轮审查的残留假绿：`test_window_icon_is_loaded_from_assets` 只验证 Python 引用存在，
+        把那行 `iconphoto` 调用删掉它照样绿。这条用 spy 把调用本身钉死。
+        """
+        from unittest import mock
+
+        if config.is_windows():
+            self.skipTest("Windows 走 iconbitmap(.ico)，不调用 iconphoto")
+        self.window.__dict__.pop("_window_icon", None)
+        calls = []
+        with mock.patch.object(self.window.root, "iconphoto",
+                               side_effect=lambda *a, **k: calls.append((a, k))):
+            self.window._set_window_icon()
+        self.assertTrue(calls, "没有调用 iconphoto：窗口图标其实还是 Tk 默认羽毛")
+        self.assertIs(calls[0][1].get("default") if calls[0][1] else calls[0][0][0], True,
+                      "iconphoto 的第一个参数应为 default=True（让后续 Toplevel 也继承）")
 
     def test_window_icon_is_loaded_from_assets(self):
         """窗口/任务栏图标必须来自 assets 里的 easysub 图标。

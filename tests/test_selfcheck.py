@@ -57,7 +57,7 @@ class DefaultChecksTest(unittest.TestCase):
     """默认四项必须过——它们就是打包作业唯一的"包没坏"证据。
 
     环境说明（独立审查纠正过我的错误描述）：CI 的 runner **是有 tkinter 的**——
-    两个 ubuntu 作业的 xvfb GUI 步骤都实跑 `Ran 32 tests … OK`（无 skip）。单元测试步骤里
+    两个 ubuntu 作业的 xvfb GUI 步骤都实跑 `test_gui` 全部用例通过（无 skip）。单元测试步骤里
     GUI 用例被跳过只是因为没开 `EASYSUB_HELPER_GUI_TESTS`；而**无 DISPLAY** 会让
     `gui.tkinter_module()` 返回 None，这才是当初那次假失败的根源（现在 `check_tkinter`
     直接 import，与显示无关）。
