@@ -53,6 +53,7 @@ _STRINGS = {
         "cli.help.token": "跳过配对，直接用固定设备令牌（仅调试/测试）",
         "cli.help.alloworigin": "额外放行的 Origin（如 Web 版的部署地址），可重复",
         "cli.help.corsall": "CORS 全放行（任意 Origin 都回 CORS 头）：助手只监听 127.0.0.1，配对码是唯一凭据，外部网页最多用错码触发限速。Web 版部署在别的域名/https 预览站时用它最省事",
+        "cli.help.selftest": "自检：检查冻结产物里的 tkinter / 资源 / 重采样 / 本机 HTTP+WS 环路，全通过退出码 0（打包作业用）",
 
         # ---- 无窗口模式下的启动横幅 ----
         "run.banner.port": "端口     : {port}",
@@ -90,6 +91,9 @@ _STRINGS = {
         "gui.deviceLabel": "设备",
         "gui.openedDevice": "设备 {device}",
         "device.default": "系统默认",
+        # 内部哨兵串的**显示**文案（真正传给 parec/pw-record 的是 @DEFAULT_MONITOR@）
+        "audio.deviceDefaultSystem": "默认输出（系统声音）",
+        "audio.deviceDefaultInput": "系统默认输入",
         "gui.levelLabel": "电平",
         "gui.levelSilent": "静音",
         "gui.levelSignal": "有信号",
@@ -99,7 +103,6 @@ _STRINGS = {
         "gui.keepOpen": "关闭窗口即结束服务；「暂停」只停采集，连接不断。",
         "gui.licenseSource": "AGPL-3.0-or-later · 源代码",
         "gui.clients": "已连接页面：{count}",
-        "gui.errStart": "启动失败：{error}",
         "gui.errNoTk": "没有可用的图形界面（缺少 tkinter 或无显示环境），已回落到命令行模式。",
 
         # ---- 日志（会显示在窗口日志区，也要 i18n）----
@@ -165,7 +168,6 @@ _STRINGS = {
         "audio.err.notOpened": "采集未打开",
         "audio.err.pysysaudioOpen": "pysysaudio 打开失败：{error}",
         "audio.err.pysysaudioDenied": "系统音频权限被拒：请在「系统设置 → 隐私与安全性 → 屏幕与系统音频录制」里授权",
-        "audio.err.macNoSystemAudio": "macOS 上拿不到系统音频：需要 macOS 14.2+ 且安装 pysysaudio，或安装 BlackHole 这类 loopback 输入设备",
 
         # ---- 重采样 ----
         "resample.err.unavailable": "无法重采样 {from_rate} -> {to_rate}（{detail}）。请安装 soxr 或 numpy。",
@@ -204,6 +206,7 @@ _STRINGS = {
         "cli.help.token": "skip pairing and use a fixed device token (debugging/testing only)",
         "cli.help.alloworigin": "extra allowed Origin (e.g. a deployed web build), repeatable",
         "cli.help.corsall": "allow CORS from any Origin: the helper only listens on 127.0.0.1 and the pair code is the only credential, so the worst an external page can do is burn pairing attempts. Easiest option for a web build deployed on another domain / an https preview site",
+        "cli.help.selftest": "self-check the frozen build (tkinter, assets, resampler, loopback HTTP+WS round trip); exits 0 only if everything passes (used by the packaging jobs)",
 
         # ---- 无窗口模式下的启动横幅 ----
         "run.banner.port": "Port     : {port}",
@@ -241,6 +244,9 @@ _STRINGS = {
         "gui.deviceLabel": "Device",
         "gui.openedDevice": "device {device}",
         "device.default": "System default",
+        # display labels for internal sentinel strings (the tool argument stays @DEFAULT_MONITOR@)
+        "audio.deviceDefaultSystem": "default output (system audio)",
+        "audio.deviceDefaultInput": "system default input",
         "gui.levelLabel": "Level",
         "gui.levelSilent": "silent",
         "gui.levelSignal": "signal",
@@ -250,7 +256,6 @@ _STRINGS = {
         "gui.keepOpen": "Closing this window stops the service; Pause only stops capture, the connection stays.",
         "gui.licenseSource": "AGPL-3.0-or-later · source code",
         "gui.clients": "pages connected: {count}",
-        "gui.errStart": "failed to start: {error}",
         "gui.errNoTk": "no usable GUI (tkinter missing or no display); falling back to the command line.",
 
         # ---- 日志（会显示在窗口日志区，也要 i18n）----
@@ -316,7 +321,6 @@ _STRINGS = {
         "audio.err.notOpened": "capture is not open",
         "audio.err.pysysaudioOpen": "pysysaudio failed to open: {error}",
         "audio.err.pysysaudioDenied": "system audio permission denied: allow it in System Settings → Privacy & Security → Screen & System Audio Recording",
-        "audio.err.macNoSystemAudio": "cannot capture system audio on macOS: needs macOS 14.2+ with pysysaudio, or a loopback input device such as BlackHole",
 
         # ---- 重采样 ----
         "resample.err.unavailable": "cannot resample {from_rate} -> {to_rate} ({detail}). Install soxr or numpy.",

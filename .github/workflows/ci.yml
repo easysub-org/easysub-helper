@@ -104,6 +104,10 @@ jobs:
         run: |
           ./dist/easysub-helper --version
           ./dist/easysub-helper --help > /dev/null
+          # 自检：tkinter 是否真进包、assets 在不在、重采样能不能跑、本机 HTTP+WS 环路通不通。
+          # 只跑 --version/--help 抓不到"打包漏了 tkinter"——--windowed 产物会静默变成
+          # 无窗口无控制台的常驻进程，CI 照样绿，用户双击却没反应。
+          ./dist/easysub-helper --selftest
           # 再起一遍服务并问它要配对信息：证明 aiohttp / 服务端代码真的进包了
           PORT=$(python -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
           ./dist/easysub-helper --no-gui --port "$PORT" --lang en &
@@ -146,6 +150,8 @@ jobs:
       - name: 冒烟（真跑冻结产物：版本 + 起服务）
         run: |
           ./dist/easysub-helper --version
+          # 自检：--windowed 产物漏了 tkinter 时会静默变无窗口常驻，只跑 --version 看不出来
+          ./dist/easysub-helper --selftest
           PORT=$(python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
           ./dist/easysub-helper --no-gui --port "$PORT" --lang en &
           APP=$!
@@ -187,6 +193,8 @@ jobs:
         shell: bash
         run: |
           ./dist/easysub-helper.exe --version
+          # 自检：--noconsole 产物漏了 tkinter 时会静默变无窗口常驻；WS/重采样也一并过一遍
+          ./dist/easysub-helper.exe --selftest
           PORT=$(python -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
           ./dist/easysub-helper.exe --no-gui --port "$PORT" --lang en &
           APP=$!

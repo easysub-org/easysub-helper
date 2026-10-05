@@ -450,6 +450,65 @@ class WebSocketTest(ServerCase):
 
         self.with_server(body)
 
+    def test_silence_ticker_does_not_stack_across_reconnects(self):
+        """暂停时「断开 → 立刻重连」（= 暂停状态下刷新页面）不许叠出多个静音 ticker。
+
+        坑（独立审查实测的竞态）：ticker 引用曾有两处写者（_sync_silence 与协程的 finally）。
+        取消是异步的，于是「断开触发 cancel 摘引用」与「重连触发新建 ticker」可以交错，
+        旧协程的 finally 会把**新**引用抹成 None → 新 ticker 成孤儿继续跑，下一次
+        _sync_silence 又建一个 → 每个 ticker 每 20ms 推一帧，速率翻倍并随重连累积。
+        复现必须打中这个交错：靠真实 TCP 断开/重连的时序是**打不中**的（实测旧实现在
+        那种写法下也只有 27 帧/0.5s，纯粹的假绿），所以这里按服务端自己的调用顺序
+        精确驱动 _queues + _sync_silence，再量队列里的到达速率。
+        """
+        async def body(_session):
+            # ① 连上：want=True → ticker A
+            q1 = asyncio.Queue()
+            self.server._queues.add(q1)
+            self.server._sync_silence()
+            first = self.server._silence_task
+            self.assertIsNotNone(first, "连上后应起静音 ticker")
+            await asyncio.sleep(0)
+
+            # ② 断开：want=False → 摘引用并 cancel（A 的 finally 还没跑）
+            self.server._queues.discard(q1)
+            self.server._sync_silence()
+            self.assertIsNone(self.server._silence_task, "断开后应摘掉引用")
+
+            # ③ 同一拍内立刻重连：want=True → 建 ticker B
+            q2 = asyncio.Queue()
+            self.server._queues.add(q2)
+            self.server._sync_silence()
+            second = self.server._silence_task
+            self.assertIsNotNone(second, "重连后应起新静音 ticker")
+            self.assertIsNot(second, first)
+
+            await asyncio.sleep(0)     # 让 A 的 finally 跑：修复前它会把 B 的引用抹掉
+
+            # ④ 再来一次"新连接"的 _sync_silence：引用若被抹过，这里会又建一个 ticker
+            q3 = asyncio.Queue()
+            self.server._queues.add(q3)
+            self.server._sync_silence()
+
+            # 量 0.3s 内 q3 的到达速率：额定 20ms/帧 → ~15 帧；叠加一个 ticker 会接近 30
+            n = 0
+            deadline = asyncio.get_event_loop().time() + 0.3
+            while asyncio.get_event_loop().time() < deadline:
+                while True:
+                    try:
+                        q3.get_nowait()
+                        n += 1
+                    except asyncio.QueueEmpty:
+                        break
+                await asyncio.sleep(0.005)
+
+            self.server._queues.clear()
+            self.server._sync_silence()
+            self.assertGreater(n, 5, "静音帧太少（{} 帧/0.3s）——ticker 没在跑".format(n))
+            self.assertLess(n, 24, "静音帧速率异常（{} 帧/0.3s，额定 ~15）：静音 ticker 叠加了".format(n))
+
+        self.with_server(body)
+
     def test_start_while_paused_is_rejected_and_silence_keeps_flowing(self):
         """暂停（默认）时：页面点开始不会打开设备，但连接与静音帧不受影响。"""
         self.use_fake_backend()
@@ -619,6 +678,45 @@ class SnapshotTest(ServerCase):
             self.assertFalse(snap["userOn"], "打不开设备就该退回暂停，窗口不能显示正在采集")
             self.assertFalse(snap["capturing"])
             self.assertTrue(snap["error"])
+
+        self.with_server(body)
+
+    def test_runtime_capture_error_returns_switch_and_keeps_silence_flowing(self):
+        """运行中采集失败：总开关退回暂停（窗口回到「启动」= 一键重试），静音帧不能断。
+
+        坑（独立审查抓的 minor）：以前只清 _session、把 user_on 留在 True——状态成了
+        paused=false + capturing=false：窗口按钮仍显示「暂停」（重试要点两次），
+        而且 _sync_silence 认为"用户要采"，连静音帧都不推，页面彻底断流。
+        """
+        class BoomBackend(FakeBackend):
+            name = "boom"
+
+            def read(self, frames):
+                raise RuntimeError("device unplugged")
+
+        original = helper_server.create_backend
+        helper_server.create_backend = lambda source="system", backend="auto", device=None, \
+            rate=16000, frame_ms=20: BoomBackend(source=source, device=device, rate=rate,
+                                                 frame_ms=frame_ms)
+        self.addCleanup(lambda: setattr(helper_server, "create_backend", original))
+
+        async def body(session):
+            async with session.ws_connect(self.ws_url(self.token()),
+                                          headers={"Origin": self.origin}) as ws:
+                await asyncio.wait_for(ws.receive(), timeout=5)          # hello
+                ok, err = await self.server.set_user_enabled(True)
+                self.assertTrue(ok, err)
+                payload = await recv_text_type(ws, "error", timeout=5)
+                self.assertEqual(payload["code"], "capture_failed")
+                self.assertTrue(payload["fatal"])
+                snap = self.server.snapshot()
+                self.assertFalse(snap["userOn"], "采集挂了就该退回暂停，让用户一键重试")
+                self.assertFalse(snap["capturing"])
+                self.assertTrue(snap["paused"], "状态不能自相矛盾（paused=false 且 capturing=false）")
+                frames = await recv_binary(ws, 2, timeout=5)
+                self.assertEqual(len(frames), 2, "采集出错后静音帧必须继续推，否则页面假装在跑")
+                for frame in frames:
+                    self.assertEqual(frame, SILENCE)
 
         self.with_server(body)
 

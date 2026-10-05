@@ -254,6 +254,8 @@ def build_parser():
                         help=t("cli.help.alloworigin"))
     parser.add_argument("--allow-cors-all", action="store_true",
                         help=t("cli.help.corsall"))
+    parser.add_argument("--selftest", action="store_true",
+                        help=t("cli.help.selftest"))
     return parser
 
 
@@ -264,6 +266,12 @@ def main(argv=None):
     if args.lang:
         set_language(args.lang)
     _setup_logging(args.log_level)
+    if args.selftest:
+        # 冻结产物自检（CI 的打包作业用它抓"包打错了但能起来 --version"这一类问题）。
+        # 必须排在 GUI/服务启动之前：它自己起一个临时服务，跑完就退。
+        from . import selfcheck
+
+        return selfcheck.main()
     if not security.is_loopback_host(args.host) and not args.allow_lan:
         _eprint(t("run.err.hostNotLoopback", host=args.host))
         return 2

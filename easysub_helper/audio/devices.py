@@ -30,14 +30,26 @@ DEFAULT_ID = ""
 #: 下拉里标签的最大长度（Linux 的 monitor 名经常 60+ 字符，太长会把下拉撑爆）
 LABEL_LIMIT = 60
 
+#: 那些**不是给人看**的内部设备串：显示前必须换成可读文案。
+#: `@DEFAULT_MONITOR@` 是 PulseAudio「默认输出 monitor」的哨兵值（原样传给 parec/pw-record
+#: 才有意义），`default source` 是 mic 未指定设备时的兜底串。独立审查抓到的现象：
+#: 窗口状态行显示成「设备 @DEFAULT_MONITOR@」。测试盯住它俩与 subprocess_backend 同值。
+INTERNAL_DEVICE_LABELS = {
+    "@DEFAULT_MONITOR@": "audio.deviceDefaultSystem",
+    "default source": "audio.deviceDefaultInput",
+}
+
 
 def default_entry(source="mic"):
     return {"id": DEFAULT_ID, "label": t("device.default"), "kind": source, "default": True}
 
 
 def label_for(name, limit=LABEL_LIMIT):
-    """把设备名压成适合下拉显示的一行。"""
+    """把设备名压成适合下拉显示的一行（内部哨兵值换成可读文案）。"""
     text = " ".join(str(name or "").split())
+    key = INTERNAL_DEVICE_LABELS.get(text)
+    if key:
+        return t(key)
     if len(text) <= limit:
         return text
     return text[: limit - 1] + "…"

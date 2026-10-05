@@ -521,24 +521,38 @@ class HelperServer(object):
 
     # ---------------- 暂停时的"空音频" ----------------
     def _sync_silence(self):
-        """暂停且有人连着 → 起静音 ticker（保持流不断）；否则停掉。只在事件循环里调。"""
+        """暂停且有人连着 → 起静音 ticker（保持流不断）；否则停掉。只在事件循环里调。
+
+        坑：`self._silence_task` 的引用**只在这里改**（ticker 自己不许动它，见 _silence_loop）。
+        """
         want = (not self.user_on) and bool(self._queues) and not self._shutting_down
-        if want and (self._silence_task is None or self._silence_task.done()):
-            self._silence_task = asyncio.ensure_future(self._silence_loop())
-        elif not want and self._silence_task is not None:
-            self._silence_task.cancel()
-            self._silence_task = None
+        if want:
+            if self._silence_task is None or self._silence_task.done():
+                self._silence_task = asyncio.ensure_future(self._silence_loop())
+        elif self._silence_task is not None:
+            task = self._silence_task
+            self._silence_task = None        # 先摘引用再取消（cancel 是异步的，finally 稍后才跑）
+            task.cancel()
 
     async def _silence_loop(self):
-        """暂停期间每 frame_ms 推一帧全零：页面时间轴不断、WS 不超时、恢复无需重连。"""
+        """暂停期间每 frame_ms 推一帧全零：页面时间轴不断、WS 不超时、恢复无需重连。
+
+        坑（独立审查实测的竞态，别在 finally 里清 self._silence_task）：本协程**不是**这个
+        引用的管理者。以前 finally 里无条件 `self._silence_task = None`，与 _sync_silence 形成
+        两个写者，于是"取消 → 立刻重连"（暂停状态下刷新页面）会这样错位：
+          ① _sync_silence 摘引用 + cancel（旧 task 的 finally 还没跑）；
+          ② 新连接触发 _sync_silence → want=True → 建**新** ticker 并赋给引用；
+          ③ 旧 task 的 finally 此刻才跑，把②刚建的引用抹成 None；
+          ④ 新 ticker 沦为孤儿但仍在跑；下一次 _sync_silence 又建一个 → ticker 叠加，
+             静音帧速率翻倍并随每次重连累积（实测 60ms 收到 6 帧，应为 ~3）。
+        现在引用只由 _sync_silence 改，叠加不可能发生。
+        """
         try:
             while (not self.user_on) and self._queues and not self._shutting_down:
                 self._broadcast(("bin", self.silence_frame))
                 await asyncio.sleep(self.frame_ms / 1000.0)
         except asyncio.CancelledError:
             pass
-        finally:
-            self._silence_task = None
 
     # ---------------- 采集线程 → 事件循环 ----------------
     def _offer(self, queue, item):
@@ -616,8 +630,16 @@ class HelperServer(object):
         # 身份不同（is 比较不受 id 复用影响），绝不能把新会话误杀
         if session is not None and session is getattr(self, "_error_session", None):
             self._session = None
+            # 坑（独立审查抓的 minor）：采集挂了却把总开关留在「启动」上，会得到一个
+            # 自相矛盾的状态：paused=false + capturing=false —— 窗口按钮仍显示「暂停」，
+            # 用户必须先点暂停再点启动才能重试；而且 _sync_silence 认为"用户要采"，
+            # 连静音帧都不推，页面那边彻底断流（时间轴停住、波形冻死）。
+            # 把开关退回暂停态：按钮变回「启动」（一键重试），静音帧继续推（页面契约不变）。
+            self.user_on = False
         self._error_session = None          # 引用用完即放,别把旧会话(含 backend/线程)钉住
         self._emit_from_thread(("json", self._state_msg()))
+        # 开关退回暂停后要立刻让静音 ticker 接上（页面那条流不能断）
+        self._sync_silence()
 
     # ---------------- WebSocket ----------------
     #: 同一时刻允许的 WS 连接数上限（每个连接一条 6 秒发送队列；防单页面开几百条）

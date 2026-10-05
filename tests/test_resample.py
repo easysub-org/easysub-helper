@@ -150,5 +150,82 @@ class FactoryTest(unittest.TestCase):
         self.assertRaises(ValueError, PolyphaseResampler, 0, 16000)
 
 
+class PolyphaseAgainstReferenceTest(unittest.TestCase):
+    """与「上采样 → 低通卷积 → 抽取」朴素基准**逐样本**比对。
+
+    坑（独立审查抓到的 blocker，这个测试就是补它）：以前只断言单音的峰值频率（±20Hz）
+    与幅度（±0.08）——**相位错位不改变单音的峰值频率**，所以 44100/22050/11025/8000
+    这类 L>1 的非整数比下"相位内抽头顺序颠倒"造成的严重失真（rms 误差 0.04~0.18、
+    频谱里冒出 6900Hz 镜像杂散）一直没被发现；48000/32000→16000 因为 L=1 恰好正确，
+    所以按 48k 写的用例全绿。这里用**双音**信号直接和朴素基准比：任何相位/对齐错误
+    都会立刻放大成明显误差。
+
+    基准刻意不共用实现的任何对齐逻辑：只从相位表还原原型 h（h[j*L+p] = phases[p][j]），
+    然后老老实实上采样、卷积、每 M 个取一个；卷积走 FFT 以免长信号拖慢测试。
+    """
+
+    CASES = (
+        (48000, 16000),   # L=1：两种写法重合（历史用例只覆盖了这类）
+        (44100, 16000),   # L=160, M=441 ← 曾经严重失真
+        (32000, 16000),
+        (22050, 16000),   # L=320
+        (11025, 16000),   # L=640
+        (8000, 16000),    # L=2
+        (16000, 44100),   # 反向（上采样到设备率）
+    )
+
+    @staticmethod
+    def _reference(x, res):
+        L, M, K = res.L, res.M, res.K
+        h = np.zeros(K * L, dtype=np.float64)
+        for p in range(L):
+            h[p::L] = res._phases[p]          # 还原原型：h[j*L + p] = phases[p][j]
+        up = np.zeros(x.size * L, dtype=np.float64)
+        up[::L] = x.astype(np.float64)
+        n = 1
+        while n < up.size + h.size - 1:
+            n *= 2
+        full = np.fft.irfft(np.fft.rfft(up, n) * np.fft.rfft(h, n), n)
+        n_out = (x.size * L) // M + 2
+        return full[np.arange(n_out, dtype=np.int64) * M]
+
+    def test_matches_naive_reference(self):
+        for in_rate, out_rate in self.CASES:
+            with self.subTest(rate="{}->{}".format(in_rate, out_rate)):
+                n = in_rate // 2                      # 0.5 秒足够看出镜像杂散
+                t = np.arange(n, dtype=np.float64) / float(in_rate)
+                x = (0.3 * np.sin(2.0 * math.pi * 1000.0 * t)
+                     + 0.2 * np.sin(2.0 * math.pi * 3000.0 * t)).astype(np.float32)
+                res = PolyphaseResampler(in_rate, out_rate)
+                y = res.process(x).astype(np.float64)
+                ref = self._reference(x, res)
+                k = min(y.size, ref.size)
+                self.assertGreater(k, 1000, "输出太短，测不出对齐问题")
+                rms = float(np.sqrt(np.mean((y[:k] - ref[:k]) ** 2)))
+                self.assertLess(
+                    rms, 1e-5,
+                    "{}->{} 与朴素基准不符（rms={:.3e}）：多相相位/对齐错了".format(in_rate, out_rate, rms))
+
+    def test_no_mirror_spur_on_dual_tone(self):
+        """双音纯净度：正确的多相输出里 1k/3k 之外不应有强杂散（相位错位会造镜像）。"""
+        in_rate = 44100
+        n = in_rate
+        t = np.arange(n, dtype=np.float64) / float(in_rate)
+        x = (0.3 * np.sin(2.0 * math.pi * 1000.0 * t)
+             + 0.2 * np.sin(2.0 * math.pi * 3000.0 * t)).astype(np.float32)
+        y = PolyphaseResampler(in_rate, 16000).process(x)
+        core = y[2000:6000]
+        spec = np.abs(np.fft.rfft(core * np.hanning(core.size)))
+        freqs = np.fft.rfftfreq(core.size, d=1.0 / 16000.0)
+        # 1k/3k 附近各取一个带宽，其它位置的最大值必须低 30dB 以上
+        keep = np.zeros_like(spec, dtype=bool)
+        for f0 in (1000.0, 3000.0):
+            keep |= np.abs(freqs - f0) < 120.0
+        peak = float(spec[keep].max())
+        spur = float(np.delete(spec, np.where(keep)[0]).max())
+        self.assertGreater(peak / max(spur, 1e-12), 31.6,   # 30 dB
+                           "通带外出现镜像杂散（相位错位的典型症状）")
+
+
 if __name__ == "__main__":
     unittest.main()

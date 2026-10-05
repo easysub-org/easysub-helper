@@ -52,6 +52,24 @@ class LabelTest(unittest.TestCase):
         self.assertEqual(devices.label_for("  A   B  "), "A B")
         self.assertEqual(devices.label_for(None), "")
 
+    def test_internal_sentinels_get_readable_labels(self):
+        """内部哨兵串不能原样显示（独立审查抓的：状态行出现「设备 @DEFAULT_MONITOR@」）。"""
+        from easysub_helper.audio import subprocess_backend
+
+        # 哨兵值必须与后端真正传给 parec/pw-record 的那个串一致（防两边漂移）
+        self.assertEqual(devices.INTERNAL_DEVICE_LABELS.get(subprocess_backend.DEFAULT_MONITOR),
+                         "audio.deviceDefaultSystem")
+        self.assertNotEqual(devices.label_for(subprocess_backend.DEFAULT_MONITOR),
+                            subprocess_backend.DEFAULT_MONITOR)
+        for raw, key in devices.INTERNAL_DEVICE_LABELS.items():
+            label = devices.label_for(raw)
+            self.assertTrue(label, "空的显示标签: " + raw)
+            self.assertNotIn("@", label, "哨兵没被换掉: " + raw)
+            self.assertIsNotNone(key)
+
+    def test_default_source_fallback_string_is_localized(self):
+        self.assertNotEqual(devices.label_for("default source"), "default source")
+
 
 PACTL_TABLE = """\
 Source #52

@@ -138,8 +138,10 @@ Linux 上装 tkinter：`sudo apt install python3-tk`（Debian/Ubuntu）、
 - **锁定是全局的**：60 秒内失败 5 次 → 锁 300 秒（期间连正确码也拒）。这是有意的（本机只有一个用户），但也意味着本机任意页面、或开了 `--allow-lan` 之后的局域网机器都能
   "用错码把配对锁住"进行骚扰 —— 用户在助手窗口点「换一个」即可解锁。所以**别在不可信网络里开 `--allow-lan`**。
 - `/api/pair` 的 **Origin 白名单是硬闸门**（有 Origin 但不允许 → 403），不只是 CORS 响应头；
-  没有 Origin 的请求（curl/脚本等非浏览器客户端）默认也拒绝，需要时用 `--allow-origin` 或
-  `allow_no_origin` 显式放行。
+  没有 Origin 的请求（curl/脚本等非浏览器客户端）默认也拒绝。
+- 放行来源的两种办法：`--allow-origin <Origin>`（逐个列，可重复）或 `--allow-cors-all`
+  （任意 Origin）。**缺 Origin 的请求两者都放不开** —— 那条路径只由构造参数
+  `HelperServer(allow_no_origin=True)` 控制（没有对应 CLI 开关，只给测试/嵌入式用法）。
 
 ## 协议速查
 
@@ -190,6 +192,11 @@ GET  /ws?token=…               WebSocket 音频通道
 只能靠你或用户（见文末"如何补上验证"）。
 
 ### 版本组合（为什么必须是这几个"老"版本）
+
+> 打包参数以 `.github/workflows/ci.yml` 的三个 package 作业为**唯一事实来源**：里面每条
+> `pyinstaller ...` 都带注释解释为什么这么传。本地要手工打包时**照抄 ci.yml 的那一条**，
+> 别用仓库外的 `*.spec`（它不被 CI 使用、也没有任何机制保证跟 ci.yml 同步，很容易漂移成
+> 一个 console=True / upx=True 的错误配方）。
 
 | 组件 | 选定 | 为什么不能更新 |
 |---|---|---|

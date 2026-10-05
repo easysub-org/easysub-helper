@@ -81,7 +81,14 @@ class PolyphaseResampler(Resampler):
 
     数学：上采样 L 倍后低通（截止 = 0.5/max(L,M)，归一化到上采样率的奈奎斯特），再抽取 M 倍。
     对输出序号 m：p = (m*M) % L，q = (m*M) // L，y[m] = Σ_j phases[p][j] * x[q-j]，
-    phases[p][j] = h[j*L + p]（h 为对称原型滤波器，故 j 的排列方向不影响结果）。
+    phases[p][j] = h[j*L + p]。
+
+    坑（独立审查实测的 blocker，别再犯）：原型 h 对称，**因此"把相位内的抽头顺序颠倒"并不是
+    无害的等价变形**——颠倒相位 p 的抽头等价于换成相位 (L-1-p) 并保持对齐，等于每个输出
+    都用错了相位。L=1（48000/32000→16000）时 p 恒为 0、两种写法重合，所以只测 48k 一直
+    全绿；44100/22050/11025/8000 这类 L>1 的输入率会严重失真（rms 误差 0.04~0.18，
+    频谱里冒出 6900Hz 这类镜像杂散）。所以下面 **idx 必须升序**（j=0..K-1 与
+    phases[p][j] 一一对应），见 tests/test_resample.py 里与朴素基准逐样本比对的用例。
     """
 
     name = "polyphase"
@@ -128,12 +135,13 @@ class PolyphaseResampler(Resampler):
             t = m * self.M
             q = t // self.L
             p = (t % self.L).astype(np.int64)
-            idx = q[:, None] - np.arange(k1, -1, -1, dtype=np.int64)[None, :]
+            # 坑：**升序**（j = 0..K-1）——必须与 phases[p][j] 一一对应；
+            # 写成降序等于把相位内抽头颠倒，会让 L>1 的转换整体用错相位（见类文档）。
+            idx = q[:, None] - np.arange(0, k1 + 1, dtype=np.int64)[None, :]
             bi = idx - base
             # 防御：流开头（全局下标为负）读前导零
             np.clip(bi, 0, buf.size - 1, out=bi)
-            sel = self._phases[p]
-            y = np.einsum("ij,ij->i", sel, buf[bi]).astype(np.float32)
+            y = np.einsum("ij,ij->i", self._phases[p], buf[bi]).astype(np.float32)
             self._m = int(m_max) + 1
         else:
             y = np.zeros(0, dtype=np.float32)
