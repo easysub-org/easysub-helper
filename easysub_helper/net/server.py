@@ -370,11 +370,19 @@ class HelperServer(object):
         """
         enabled = bool(enabled)
         session = None
+        stale = None
         async with self._get_lock():
             if enabled == self.user_on:
+                # no-op 成功：也把上一次失败的提示清掉（独立审查抓的陈旧展示）
+                self.last_error = None
                 return True, None
             self.user_on = enabled
             if enabled:
+                # 兜底（第七轮审查实测的 major）：开设备前先摘掉任何还活着的会话。
+                # 场景：切换音源/设备失败已被收敛（user_on=False），但用户**立刻**点「启动」，
+                # 与回退重开交错时曾叠出两个并行推帧的 CaptureSession（1 秒 129 帧、应约 50），
+                # 且 stop 收不干净（backend 泄漏）。摘掉后由下面的 _join 统一收尸。
+                stale = self._detach_locked()
                 ok, err = await self._open_locked()
                 if not ok:
                     # 打不开就退回暂停：窗口不能显示"正在采集"却没有设备
@@ -385,6 +393,7 @@ class HelperServer(object):
             else:
                 session = self._detach_locked()
         await self._join(session)
+        await self._join(stale)
         self.last_error = None             # 用户手动操作成功：上一次失败的提示就过时了（别再挂着）
         self._broadcast(("json", self._state_msg()))
         self._sync_silence()
@@ -520,6 +529,7 @@ class HelperServer(object):
         # 这一最常见操作被无声吞掉。这里直接同步，窗口操作永远高于残留。
         self._capture_source = source
         if not self._holding():
+            self.last_error = None        # 切换成功：上一次失败的提示就过时了（暂停态切回可用音源）
             return True, None
         return await self._restart(source)
 
@@ -544,7 +554,14 @@ class HelperServer(object):
             # 打不开就退回原设备，并且如实报错（否则用户以为"切了但声音没变"）
             self.device = previous
             self.last_error = error
-            await self._restart()
+            # 坑（第七轮审查实测的 major）：`_restart` 失败时已由
+            # `_recover_after_failed_restart` 把总开关退回「暂停」（user_on=False）。
+            # 此时**不能**再无条件"回退旧设备再开一次"——那会在暂停态重开出会话：
+            # user_on=False + capturing=True 自相矛盾，页面收到真实帧与静音帧交错，
+            # 用户再点「启动」会叠出第二个会话（实测 stop 后 3 秒仍有 backend 未 close）。
+            # 已被收敛时就直接报错：反正已暂停，下次点「启动」自然用回退后的设备。
+            if self._session is not None:
+                await self._restart()
             return False, error
         return True, None
 

@@ -819,6 +819,55 @@ class SnapshotTest(ServerCase):
 
         self.with_server(body)
 
+    def test_switch_device_failure_must_not_reopen_in_paused_state(self):
+        """切设备失败、且已被恢复逻辑收敛（user_on=False）时：**不得**再"回退旧设备重开一次"。
+
+        坑（第七轮审查实测的 major）：恢复逻辑把 user_on 退回 False 后，回退重试照样执行 →
+        **暂停态重开出会话**（user_on=False + capturing=True 自相矛盾）：页面收到真实帧与
+        静音帧**交错**，用户再点「启动」叠出第二个会话（1 秒 129 帧、应约 50），
+        stop 后 3 秒仍有 backend 未 close。规则：已收敛就直接报错——反正已暂停，
+        下次点「启动」自然用回退后的设备。另核对 `set_user_enabled(True)` 的 detach 兜底。
+        """
+        from easysub_helper.audio import BackendError
+
+        attempts = {"n": 0}
+
+        def fail_only_on_second_open(source="system", backend="auto", device=None,
+                                     rate=16000, frame_ms=20):
+            attempts["n"] += 1
+            # 第 1 次：set_user_enabled(True) 成功；第 2 次：switch_device 重启失败
+            # （恢复逻辑收敛，回退重试必须被跳过）；第 3 次：用户再点「启动」——
+            # 必须能正常成功，且只建**一个**会话（若旧实现回退重开，这里会叠出第二个）。
+            if attempts["n"] == 2:
+                raise BackendError("device gone")
+            return FakeBackend(source=source, device=device, rate=rate,
+                               frame_ms=frame_ms, value=0.5)
+
+        original = helper_server.create_backend
+        helper_server.create_backend = fail_only_on_second_open
+        self.addCleanup(lambda: setattr(helper_server, "create_backend", original))
+
+        async def body(_session):
+            ok, err = await self.server.set_user_enabled(True)
+            self.assertTrue(ok, err)
+            self.assertTrue(self.server.snapshot()["capturing"])
+
+            # 切到"系统默认设备"（device=None）：解析被跳过，直接落到 create_backend 失败
+            ok, err = await self.server.switch_device(None)
+            self.assertFalse(ok)
+            snap = self.server.snapshot()
+            self.assertFalse(snap["userOn"], "已被恢复逻辑收敛：总开关应保持在暂停")
+            # 关键断言：**暂停态不得重开出会话**（旧实现回退重开 → capturing=True）
+            self.assertFalse(snap["capturing"], "回退重试不得在暂停态重开出会话")
+            # 兜底验证：再点「启动」不会叠出第二个会话（detach 兜底 + 正常 open）
+            ok, err = await self.server.set_user_enabled(True)
+            self.assertTrue(ok, err)
+            snap = self.server.snapshot()
+            self.assertTrue(snap["capturing"])
+            self.assertFalse(snap["userOn"] is None)
+
+        self.with_server(body)
+
     def test_capture_thread_hooks_wrap_open_and_close(self):
         """采集线程：prepare_thread() 必须在 open() 之前，cleanup_thread() 在 close() 之后。
 
