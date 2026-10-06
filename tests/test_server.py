@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import socket
+import threading
 import time
 import unittest
 
@@ -1028,16 +1029,59 @@ class SnapshotTest(ServerCase):
 
         self.with_server(body)
 
-    def _patch_resolve_by_device(self, slow_device, slow_s=0.4, fast_s=0.05):
-        """按设备名给 `audio_devices.resolve` 不同耗时（复现"先点慢解析、后点快解析"）。"""
+    def test_two_failing_sessions_do_not_swallow_the_current_error(self):
+        """两条会话在同一 loop 排空窗口内报错：**当前会话**的致命错误必须仍被报出来。
+
+        坑（第十二轮审查实测的新缝 DOUBLE）：以前身份靠**单槽** `self._error_session` 传递。
+        当前会话先报错、陈旧会话后报错（把槽覆盖成旧的）时，排空里当前会话的 finish 回调
+        读到的却是陈旧会话 → 判成"不是当前会话"直接返回 → 真错误被**静默吞掉**：
+        `_session` 留着死会话、`user_on=True`、`error=None`、页面收不到 `capture_failed`、
+        静音也不接（`_session is not None`）→ 页面彻底断流且窗口什么都不显示。
+        修法：会话随 `call_soon_threadsafe` 传参，删掉单槽。
+        """
+        self.use_fake_backend()
+
+        async def body(_session):
+            self.assertTrue((await self.server.set_user_enabled(True))[0])
+            stale = self.server._session
+            self.assertTrue((await self.server.switch_source("mic"))[0])
+            current = self.server._session
+            self.assertIsNot(stale, current)
+            # 同一次排空窗口：当前会话先报错、陈旧会话后报错（后者会覆盖"单槽"）
+            self.server._on_capture_error(RuntimeError("current died"), current)
+            self.server._on_capture_error(RuntimeError("stale died"), stale)
+            await asyncio.sleep(0.05)                     # 让两个回调跑完
+            snap = self.server.snapshot()
+            self.assertEqual(snap["error"], "current died",
+                             "★ DOUBLE：当前会话的致命错误被吞了（单槽互相清空）")
+            self.assertFalse(snap["userOn"], "★ DOUBLE：必须退回暂停，否则页面断流且窗口无提示")
+            self.assertIsNone(self.server._session, "死会话必须被摘掉")
+
+        self.with_server(body)
+
+    def _patch_resolve_by_device(self, slow_device, fast_s=0.05):
+        """按设备名给 `audio_devices.resolve` 不同行为：慢设备**挂在 Event 上**由测试放行。
+
+        坑（第十二轮审查）：原来用 `time.sleep(0.4)` + `await asyncio.sleep(0.1)` 的墙钟余量，
+        在慢机器上（0.1s 实耗 >0.4s）第二次点击会落在慢解析**之后** → 这两条回归会**丧失杀伤力**
+        （变异后仍绿 = 假阴性）。改成 Event 握手：慢解析挂住 → 测试确定看到 `started` 再点第二次
+        → 再 `release.set()` 放行。返回 `(started, release)`。
+        """
         orig = helper_server.audio_devices.resolve
+        started = threading.Event()
+        release = threading.Event()
 
         def resolve(source, device):
-            time.sleep(slow_s if device == slow_device else fast_s)
+            if device == slow_device:
+                started.set()
+                release.wait(timeout=5)
+            else:
+                time.sleep(fast_s)
             return device, None
 
         helper_server.audio_devices.resolve = resolve
         self.addCleanup(lambda: setattr(helper_server.audio_devices, "resolve", orig))
+        return started, release
 
     def test_last_device_click_wins_when_resolution_speeds_differ(self):
         """连点两次设备下拉：**最后一次点击必须生效**（并发审计 F3b 实测的 major）。
@@ -1048,13 +1092,16 @@ class SnapshotTest(ServerCase):
         修法：`_intent_seq` 意图序号 —— 解析回来发现已过期就丢弃本次结果。
         """
         self.use_fake_backend()
-        self._patch_resolve_by_device(slow_device="设备A", slow_s=0.4, fast_s=0.05)
+        started, release = self._patch_resolve_by_device("设备A")
 
         async def body(_session):
             self.assertTrue((await self.server.set_user_enabled(True))[0])
+            loop = asyncio.get_event_loop()
             slow = asyncio.ensure_future(self.server.switch_device("设备A"))
-            await asyncio.sleep(0.1)                     # A 还在慢解析里
+            # 确定慢解析已经挂住（Event 握手，不靠墙钟）
+            await loop.run_in_executor(None, started.wait, 5)
             self.assertTrue((await self.server.switch_device("设备B"))[0])   # 后点、解析快
+            release.set()                                 # 放行慢解析
             self.assertTrue((await slow)[0])
             self.assertEqual(self.server.device, "设备B",
                              "★ 最后一次点击必须生效（旧实现会被慢解析的 A 覆盖）")
@@ -1070,7 +1117,7 @@ class SnapshotTest(ServerCase):
         """
         from easysub_helper.audio import BackendError
 
-        self._patch_resolve_by_device(slow_device="设备A", slow_s=0.4, fast_s=0.02)
+        started, release = self._patch_resolve_by_device("设备A", fast_s=0.02)
 
         def strict_backend(source="system", backend="auto", device=None, rate=16000, frame_ms=20):
             # 真机上的"打不开"就长这样：新音源配旧设备名 → 后端直接拒
@@ -1085,9 +1132,11 @@ class SnapshotTest(ServerCase):
 
         async def body(_session):
             self.assertTrue((await self.server.set_user_enabled(True))[0])
+            loop = asyncio.get_event_loop()
             slow = asyncio.ensure_future(self.server.switch_device("设备A"))
-            await asyncio.sleep(0.1)                     # 设备切换还在慢解析里
+            await loop.run_in_executor(None, started.wait, 5)   # 确定设备切换在慢解析里
             self.assertTrue((await self.server.switch_source("mic"))[0])   # 用户改点音源
+            release.set()
             await slow
             snap = self.server.snapshot()
             self.assertTrue(snap["userOn"], "★ 不得把最后一次切换收敛成暂停（F3①）")

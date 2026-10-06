@@ -792,25 +792,35 @@ class HelperServer(object):
         # 之前），而当前会话其实好好在采。改为回到 loop 侧、判过会话身份再写。
         # 坑（并发审计实测的 major F2）：**用回调绑定的会话实例**，不要在这里现读 self._session。
         # 采集线程与事件循环并发，旧会话在 `session.stop` 排队（默认线程池被慢解析占住）时抛错，
-        # 现读会把旧会话的错误认到新会话头上：新会话被清掉且没人 join → 孤儿推帧 + backend 泄漏
-        # （实测甚至跨过 server.stop() 还活着）。`session=None` 只作兼容兜底。
+        # 现读会把旧会话的错误认到新会话头上：新会话被清掉且没人 join → 孤儿推帧 + backend 泄漏。
+        # `session=None` 只作兼容兜底。
         if session is None:
             session = self._session
-        # 存**对象引用**而不是 id()：旧会话若在排队窗口内被 GC，新会话可能复用同一 id()
-        self._error_session = session
         loop = self._loop
         if loop is None or loop.is_closed():
-            # 循环没了：只能就地收尾（进程多半在退出）——同样只处理"还是出错的那个"
-            if self._session is session:
-                self._session = None
-                self.last_error = str(exc)
+            self._finish_capture_error_now(exc, session)
             return
-        loop.call_soon_threadsafe(self._finish_capture_error_on_loop, exc)
+        try:
+            # 坑（第十二轮审查实测的新缝 DOUBLE）：**会话必须随回调一起传过去**。
+            # 以前用单槽 `self._error_session` 传递身份 —— 两条会话在同一 loop 排空窗口内先后
+            # 报错、且陈旧者后写槽时，两个 finish 回调互相清槽：当前会话的**真致命错误**被静默
+            # 吞掉（`_session` 留着死会话、`user_on=True`、`error=None`、页面收不到
+            # capture_failed、静音也不接）→ 页面彻底断流且窗口什么都不显示。
+            loop.call_soon_threadsafe(self._finish_capture_error_on_loop, exc, session)
+        except RuntimeError:
+            # loop 在 `is_closed()` 与 `call_soon_threadsafe` 之间被关掉（TOCTOU）：与
+            # `_emit_from_thread` 一致地兜住 —— 否则异常从采集线程抛穿、被
+            # `CaptureSession._fail` 的 except 吞掉 → 只剩日志、会话不清（仅关闭瞬间）。
+            self._finish_capture_error_now(exc, session)
 
-    def _finish_capture_error_on_loop(self, exc):
-        failing = getattr(self, "_error_session", None)
-        self._error_session = None          # 引用用完即放,别把旧会话(含 backend/线程)钉住
-        if failing is None or self._session is not failing:
+    def _finish_capture_error_now(self, exc, session):
+        """loop 已不在/已关闭：就地收尾（进程多半在退出），只处理"还是出错的那个"。"""
+        if session is not None and self._session is session:
+            self._session = None
+            self.last_error = str(exc)
+
+    def _finish_capture_error_on_loop(self, exc, session):
+        if session is None or self._session is not session:
             # 坑（第十一轮审查实测的 major 新缝）：**陈旧会话的迟到错误到此为止**。
             # 它已经不是当前会话了；若还写 last_error、还广播 fatal=true 的 capture_failed：
             #   ① 窗口显示红色「采集故障」压住「采集中」，而音频其实一直在流；
