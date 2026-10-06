@@ -730,6 +730,41 @@ class SnapshotTest(ServerCase):
 
         self.with_server(body)
 
+    def test_switch_source_while_paused_then_start_uses_the_new_source(self):
+        """暂停状态下切音源，再点「启动」：必须用**新**音源。
+
+        坑（全盲审查实测复现的 major）：`_capture_source` 一旦采集过就永久残留，而
+        `set_user_enabled(True)` 重开时 `_open_locked()` 不带 source → 残留值优先于窗口新选的
+        `default_source`。实测：采 system → 暂停 → 切麦克风 → 再启动，实际建的还是 system
+        （backends_built=['system','system']）——"暂停换音源再启动"被无声吞掉。
+        （旧用例只断言 default_source 变了，没覆盖"之后再启动用哪个"，正是盲区所在。）
+        """
+        built = []
+        original = helper_server.create_backend
+
+        def recording(source="system", backend="auto", device=None, rate=16000, frame_ms=20):
+            built.append(source)
+            return FakeBackend(source=source, device=device, rate=rate,
+                               frame_ms=frame_ms, value=0.5)
+
+        helper_server.create_backend = recording
+        self.addCleanup(lambda: setattr(helper_server, "create_backend", original))
+
+        async def body(_session):
+            # 采 system → 暂停（_capture_source 从此残留 "system"）
+            self.assertTrue((await self.server.set_user_enabled(True))[0])
+            self.assertTrue((await self.server.set_user_enabled(False))[0])
+            # 暂停状态下切到 mic：窗口下拉显示已切换（此前只改 default_source）
+            ok, err = await self.server.switch_source("mic")
+            self.assertTrue(ok, err)
+            # 再点「启动」：必须用 mic，而不是残留的 system
+            self.assertTrue((await self.server.set_user_enabled(True))[0])
+            self.assertEqual(built, ["system", "mic"],
+                             "暂停后切音源没生效：实际建的后端 = %r" % built)
+            self.assertEqual(self.server.snapshot()["source"], "mic")
+
+        self.with_server(body)
+
     def test_switch_source_failure_recovers_switch_and_keeps_silence_flowing(self):
         """采集中切音源、重启失败：总开关退回暂停 + 静音帧续推（不能无声冻结）。
 

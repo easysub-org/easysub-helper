@@ -513,6 +513,12 @@ class HelperServer(object):
         if source != self.default_source:
             self.device = None
         self.default_source = source
+        # 坑（全盲审查实测的 major）：**非采集态也要同步 `_capture_source`**。它一旦采集过就
+        # 永久残留，而 `set_user_enabled(True)` 重开时 `_open_locked()` 不带 source → 残留值
+        # 优先于窗口新选的 default_source。实测：采 system → 暂停 → 切麦克风 → 再点启动，
+        # 实际建的后端还是 system（snapshot/WS state 都报 system）——用户"暂停换音源再启动"
+        # 这一最常见操作被无声吞掉。这里直接同步，窗口操作永远高于残留。
+        self._capture_source = source
         if not self._holding():
             return True, None
         return await self._restart(source)
