@@ -819,8 +819,11 @@ class SnapshotTest(ServerCase):
 
         self.with_server(body)
 
-    def _slow_close_backend(self, opened):
-        """造一个"关闭很慢"的后端：`_join` 会被拖住 ~0.3s，好让并发操作落进那个锁间隙。"""
+    def _slow_close_backend(self, opened, built=None):
+        """造一个"关闭很慢"的后端：`_join` 会被拖住 ~0.3s，好让并发操作落进那个锁间隙。
+
+        `built` 传入列表时会记录每次建后端用的 `source`（用于断言"最后谁生效"）。
+        """
         class SlowCloseBackend(FakeBackend):
             def open(self):
                 super().open()
@@ -831,11 +834,47 @@ class SnapshotTest(ServerCase):
                 super().close()
                 opened.discard(id(self))
 
+        def factory(source="system", backend="auto", device=None, rate=16000, frame_ms=20):
+            if built is not None:
+                built.append(source)
+            return SlowCloseBackend(source=source, device=device, rate=rate,
+                                    frame_ms=frame_ms, value=0.5)
+
         original = helper_server.create_backend
-        helper_server.create_backend = lambda source="system", backend="auto", device=None, \
-            rate=16000, frame_ms=20: SlowCloseBackend(source=source, device=device, rate=rate,
-                                                      frame_ms=frame_ms, value=0.5)
+        helper_server.create_backend = factory
         self.addCleanup(lambda: setattr(helper_server, "create_backend", original))
+
+    def test_source_clicked_during_restart_gap_wins(self):
+        """重启间隙里又点了一次音源：**最后一次选择必须生效**（第九轮审查实测的 major）。
+
+        根因：`_restart` 以前用调用时快照的 `source` 开设备，而 `_open_locked(source)` 还会把它
+        **写回** `_capture_source`。间隙里用户再点一次别的音源只落库（非采集态分支不开设备），
+        随后在飞的重启用**旧** source 开设备并覆盖回来 —— GUI 下拉显示最后一次选择、实际采的
+        却是旧音源，暂停再启动仍是旧的（选择永久失效，head 与基线同样 2/2 复现）。
+        修法：重开时**无参**调用 `_open_locked()`，取每次切换都已同步好的"当前意图"。
+        """
+        opened, built = set(), []
+        self._slow_close_backend(opened, built)
+
+        async def body(_session):
+            ok, err = await self.server.set_user_enabled(True)      # 默认 source = system
+            self.assertTrue(ok, err)
+            # 点「麦克风」→ 采集态 → 走重启（慢 join，锁在这个窗口里放开）
+            restart = asyncio.ensure_future(self.server.switch_source("mic"))
+            await asyncio.sleep(0.1)                                # 让重启进到 join 间隙
+            # 间隙里又点回「系统音频」：这是用户**最后一次**选择
+            ok, err = await self.server.switch_source("system")
+            self.assertTrue(ok, err)
+            await restart
+
+            snap = self.server.snapshot()
+            self.assertEqual(snap["source"], "system",
+                             "★ 最后一次点击必须生效（旧实现会让 'mic' 覆盖回来）")
+            self.assertEqual(built[-1], "system",
+                             "实际建的后端也必须是最后一次选择：built=%r" % built)
+            self.assertTrue(snap["capturing"], "设备必须真的被打开（不能变成没人开的静音态）")
+
+        self.with_server(body)
 
     def test_pause_during_restart_gap_does_not_reopen_capture(self):
         """重启的 join 间隙里点「暂停」：不得再开出会话（第八轮审查 S1，实测 3/3 复现）。
@@ -843,7 +882,10 @@ class SnapshotTest(ServerCase):
         根因：`_restart` 在 `await self._join(session)` 处放开锁，间隙里用户点了「暂停」——
         那次暂停把 user_on 置 False 并接管清理，而重启回来后**照常开设备**，于是得到
         `userOn=False + capturing=True` 的自相矛盾态：真实帧与静音帧交错、窗口显示"已暂停"
-        却在采音频。修法：join 之后复查代次/开关，有更新的意图就作废本次重启。
+        却在采音频。修法：join 之后复查开关/代次，有更新的意图就作废本次重启。
+
+        哪一条在承重（第九轮审查的变异结论）：**`if not self.user_on` 复查**。把代次机制
+        整个删掉这条测试仍是绿的；只有同时去掉 user_on 复查，它才会红。
         """
         opened = set()
         self._slow_close_backend(opened)
@@ -873,6 +915,9 @@ class SnapshotTest(ServerCase):
         **无条件覆盖** `_session` —— 前一个会话没人 join/stop，变成并行推帧的孤儿
         （实测双会话各 ~50fps、暂停后仍剩 1 个 running + backend 未 close）。
         修法：页面 start 也推进代次（让在飞的重启作废）+ `_open_locked` 不覆盖存活会话。
+
+        哪一条在承重（第九轮审查的变异结论）：**`_open_locked` 开头的"不覆盖存活会话"**。
+        只删代次机制时这条测试仍是绿的；两道都去掉才会红（打开 backend 数 2≠1）。
         """
         opened = set()
         self._slow_close_backend(opened)

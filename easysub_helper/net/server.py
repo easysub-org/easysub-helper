@@ -119,9 +119,13 @@ class HelperServer(object):
         self._silence_task = None
         #: 「采集意图」的代次：启动/暂停/重启/页面 start 每次都会 +1。
         #: 用途：`_restart` 在 `await self._join(session)` 处**会放开锁**，间隙里可能落进
-        #: 用户点击或页面自动 start —— 那两种都是更新的意图，本次重启必须作废
-        #: （第八轮审查实测 S1/S2：否则会开出 userOn=False+capturing=True 的矛盾会话，
-        #:  或把别人刚开的会话覆盖成没人 join 的孤儿）。
+        #: 用户点击或页面自动 start —— 那两种都是更新的意图，本次重启必须作废。
+        #:
+        #: **诚实说明（第九轮审查的变异结论）**：这是**纵深防御，不是唯一承重**。
+        #: 把它整个删掉，两条间隙回归测试仍然是绿的 —— 真正挡住 S1 的是 `_restart` 里
+        #: `if not self.user_on` 复查，挡住 S2 的是 `_open_locked` 开头的"不覆盖存活会话"防线。
+        #: 保留它是因为"意图变化"这个语义足够便宜、能让未来新增的间隙路径自动被覆盖；
+        #: 但**别再声称哪条测试是靠它变红的**。
         self._capture_epoch = 0
         self._shutting_down = False
 
@@ -496,7 +500,7 @@ class HelperServer(object):
         self._sync_silence()
         return session is not None
 
-    async def _restart(self, source=None):
+    async def _restart(self):
         """关掉当前会话并按新参数重开（窗口换音源/换设备时用）。
 
         坑（独立审查实测的 major）：重开失败时不能只把错误返回 —— 调用方（switch_source /
@@ -512,6 +516,16 @@ class HelperServer(object):
           * 页面 onopen 自动发 start（S2）→ 它已经开出一个会话，本次重启再开就会把它
             **覆盖**成没人 join 的孤儿（实测双会话各 ~50fps、暂停收不掉、backend 泄漏）。
         因此 join 之后必须复查代次：只要中间发生过任何更新的意图，本次重启就作废。
+
+        坑三（第九轮审查实测的 major）：**开设备必须用"当前意图"，不能用调用时快照的参数**。
+        间隙里用户可能又点了一次音源（`switch_source` 在非采集态只落库 `default_source` /
+        `_capture_source`，不开设备），此时若拿旧快照 `source` 去开，`_open_locked(source)` 还会
+        把它**写回** `_capture_source` —— 用户最后一次点击被覆盖并持久化：GUI 下拉显示 A、
+        实际采集 B，暂停再启动仍是 B（选择永久失效，head 与基线同样 2/2 复现）。
+        所以这里**无参**调用 `_open_locked()`：它取 `_capture_source`（每次切换都已同步），
+        即"用户最后选的"。（注意：**不能**改成在 switch_source 的非采集态分支推进代次 ——
+        那会让在飞的重启直接作废，而那次切换又不自己开设备，于是留下
+        `userOn=true + capturing=false` 的静音态。）
         """
         async with self._get_lock():
             self._capture_epoch += 1        # 本次重启拥有当前代次
@@ -523,7 +537,7 @@ class HelperServer(object):
                 return True, None           # 间隙里有更新的意图：别开设备，交给那次操作
             if not self.user_on:
                 return True, None           # 用户已暂停（可能正是间隙里点的）
-            ok, error = await self._open_locked(source)
+            ok, error = await self._open_locked()
         if not ok:
             await self._recover_after_failed_restart()
         return ok, error
@@ -566,7 +580,7 @@ class HelperServer(object):
         if not self._holding():
             self.last_error = None        # 切换成功：上一次失败的提示就过时了（暂停态切回可用音源）
             return True, None
-        return await self._restart(source)
+        return await self._restart()
 
     async def switch_device(self, device):
         """切换采集设备（窗口里的「设备」下拉）。`None`/空串 = 用系统默认设备。
@@ -595,6 +609,12 @@ class HelperServer(object):
             # user_on=False + capturing=True 自相矛盾，页面收到真实帧与静音帧交错，
             # 用户再点「启动」会叠出第二个会话（实测 stop 后 3 秒仍有 backend 未 close）。
             # 已被收敛时就直接报错：反正已暂停，下次点「启动」自然用回退后的设备。
+            #
+            # 下面这一句是**纯防御**（第九轮审查指出它按当前设计不可达）：走到这里必然
+            # `_open_locked` 失败过，而失败时绝不会装上会话（`_session` 仍是 None）；
+            # 若间隙里有页面 start 抢开了会话，`_open_locked` 会走"不覆盖存活会话"提前返回
+            # True，于是根本进不来这个分支。留着的理由：`user_on=True + capturing=False`
+            # 正是我们反复修的那种"静音冻结"态，多一道兜底比省两行值。
             if self._session is not None:
                 await self._restart()
             return False, error
