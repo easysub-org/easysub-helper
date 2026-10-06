@@ -385,6 +385,7 @@ class HelperServer(object):
             else:
                 session = self._detach_locked()
         await self._join(session)
+        self.last_error = None             # 用户手动操作成功：上一次失败的提示就过时了（别再挂着）
         self._broadcast(("json", self._state_msg()))
         self._sync_silence()
         return True, None
@@ -467,12 +468,34 @@ class HelperServer(object):
         return session is not None
 
     async def _restart(self, source=None):
-        """关掉当前会话并按新参数重开（窗口换音源/换设备时用）。"""
+        """关掉当前会话并按新参数重开（窗口换音源/换设备时用）。
+
+        坑（独立审查实测的 major）：重开失败时不能只把错误返回 —— 调用方（switch_source /
+        switch_device 的回退）未必会再试一次，服务器就会停在
+        `user_on=True + capturing=False` 的自相矛盾状态：页面断流、窗口按钮仍显示「暂停」，
+        恢复要点两次。所以失败后必须走 `_recover_after_failed_restart` 收敛。
+        """
         async with self._get_lock():
             session = self._detach_locked()
         await self._join(session)
         async with self._get_lock():
-            return await self._open_locked(source)
+            ok, error = await self._open_locked(source)
+        if not ok:
+            await self._recover_after_failed_restart()
+        return ok, error
+
+    async def _recover_after_failed_restart(self):
+        """重启采集失败后的收敛：与 `_finish_capture_error_on_loop` 同一套契约。
+
+        没有存活的会话时把总开关退回「暂停」：状态恢复一致（paused=true）、窗口按钮回到
+        「启动」（一键重试）、`_sync_silence()` 接上静音帧 —— **页面那条流不能断**。
+        若调用方已经自己重试成功（`_session` 活着），这里只广播一次状态。
+        """
+        async with self._get_lock():
+            if self._session is None and self.user_on:
+                self.user_on = False
+        self._broadcast(("json", self._state_msg()))
+        self._sync_silence()
 
     def _holding(self):
         return bool(self.user_on and self._session is not None and self._session.running)

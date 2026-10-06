@@ -730,6 +730,60 @@ class SnapshotTest(ServerCase):
 
         self.with_server(body)
 
+    def test_switch_source_failure_recovers_switch_and_keeps_silence_flowing(self):
+        """采集中切音源、重启失败：总开关退回暂停 + 静音帧续推（不能无声冻结）。
+
+        坑（独立审查实测的 major）：`_restart` 失败以前只把错误返回，服务器停在
+        `user_on=True + capturing=False` 的自相矛盾状态——页面 1 秒内只收到 1 帧后彻底断流，
+        窗口按钮仍显示「暂停」，重试要点两次。现在失败后走 `_recover_after_failed_restart`：
+        与"运行时采集挂掉"同一套契约（退回暂停、广播状态、静音续推）。
+        """
+        def mic_fails(source="system", backend="auto", device=None, rate=16000, frame_ms=20):
+            from easysub_helper.audio import BackendError
+
+            if source == "mic":
+                raise BackendError("no microphone here")
+            return FakeBackend(source=source, device=device, rate=rate,
+                               frame_ms=frame_ms, value=0.5)
+
+        original = helper_server.create_backend
+        helper_server.create_backend = mic_fails
+        self.addCleanup(lambda: setattr(helper_server, "create_backend", original))
+
+        async def body(session):
+            async with session.ws_connect(self.ws_url(self.token()),
+                                          headers={"Origin": self.origin}) as ws:
+                await asyncio.wait_for(ws.receive(), timeout=5)          # hello
+                ok, err = await self.server.set_user_enabled(True)
+                self.assertTrue(ok, err)
+                # 等真实帧：刚取消的静音 ticker 可能还压了几帧全零进队列，别被它骗了
+                saw_real = False
+                for _ in range(50):
+                    frame = (await recv_binary(ws, 1, timeout=5))[0]
+                    if frame != SILENCE:
+                        saw_real = True
+                        break
+                self.assertTrue(saw_real, "启动后应出现真实帧")
+
+                ok, err = await self.server.switch_source("mic")        # ← 重启失败
+                self.assertFalse(ok)
+                self.assertIn("no microphone", err)
+
+                snap = self.server.snapshot()
+                self.assertFalse(snap["userOn"], "重启失败必须把总开关退回暂停（一键重试）")
+                self.assertTrue(snap["paused"], "状态不能自相矛盾（paused=False 且 capturing=False）")
+                self.assertFalse(snap["capturing"])
+                # 页面那条流不能断：接下来必须开始出现静音帧
+                saw_silence = False
+                for _ in range(50):
+                    frame = (await recv_binary(ws, 1, timeout=5))[0]
+                    if frame == SILENCE:
+                        saw_silence = True
+                        break
+                self.assertTrue(saw_silence, "切换失败后必须续推静音帧，否则页面无声冻结")
+
+        self.with_server(body)
+
     def test_capture_thread_hooks_wrap_open_and_close(self):
         """采集线程：prepare_thread() 必须在 open() 之前，cleanup_thread() 在 close() 之后。
 
