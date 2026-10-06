@@ -117,6 +117,12 @@ class HelperServer(object):
         self._runner = None
         self._site = None
         self._silence_task = None
+        #: 「采集意图」的代次：启动/暂停/重启/页面 start 每次都会 +1。
+        #: 用途：`_restart` 在 `await self._join(session)` 处**会放开锁**，间隙里可能落进
+        #: 用户点击或页面自动 start —— 那两种都是更新的意图，本次重启必须作废
+        #: （第八轮审查实测 S1/S2：否则会开出 userOn=False+capturing=True 的矛盾会话，
+        #:  或把别人刚开的会话覆盖成没人 join 的孤儿）。
+        self._capture_epoch = 0
         self._shutting_down = False
 
     # ---------------- 生命周期 ----------------
@@ -371,11 +377,14 @@ class HelperServer(object):
         enabled = bool(enabled)
         session = None
         stale = None
+        failure = None
         async with self._get_lock():
             if enabled == self.user_on:
                 # no-op 成功：也把上一次失败的提示清掉（独立审查抓的陈旧展示）
                 self.last_error = None
                 return True, None
+            # 意图变化：让任何"在飞的重启"作废（第八轮审查 S1/S2 —— 重启间隙里点暂停/启动）
+            self._capture_epoch += 1
             self.user_on = enabled
             if enabled:
                 # 兜底（第七轮审查实测的 major）：开设备前先摘掉任何还活着的会话。
@@ -387,16 +396,18 @@ class HelperServer(object):
                 if not ok:
                     # 打不开就退回暂停：窗口不能显示"正在采集"却没有设备
                     self.user_on = False
-                    self._broadcast(("json", self._state_msg()))
-                    self._sync_silence()
-                    return False, err
+                    failure = err
             else:
                 session = self._detach_locked()
+        # 坑（第八轮审查）：**失败路径也必须 join** —— 以前 open 失败时提前 return，
+        # 被 detach 的旧会话（stale）没人收，采集线程与设备句柄就这么泄漏了。
         await self._join(session)
         await self._join(stale)
-        self.last_error = None             # 用户手动操作成功：上一次失败的提示就过时了（别再挂着）
         self._broadcast(("json", self._state_msg()))
         self._sync_silence()
+        if failure is not None:
+            return False, failure
+        self.last_error = None             # 用户手动操作成功：上一次失败的提示就过时了（别再挂着）
         return True, None
 
     async def start_capture(self, source=None, device=None):
@@ -404,6 +415,9 @@ class HelperServer(object):
         async with self._get_lock():
             if self._session is not None and self._session.running:
                 return True, None          # 已在采：多客户端共享同一会话，不算错
+            # 页面 start 也是一次"意图变化"：让在飞的重启作废，否则它随后会把这里刚开的
+            # 会话**覆盖**成没人 join 的孤儿（第八轮审查 S2 实测双会话 + backend 泄漏）。
+            self._capture_epoch += 1
             return await self._open_locked(source, device)
 
     async def _resolve_device(self, source, device):
@@ -421,6 +435,11 @@ class HelperServer(object):
         return resolved or device, None
 
     async def _open_locked(self, source=None, device=None):
+        # 防御（第八轮审查 S2）：绝不覆盖一个正在跑的会话 —— 被覆盖的那个再也没人 join/stop，
+        # 会变成并行推帧的孤儿（实测双会话各 ~50fps、暂停也收不掉、backend 泄漏）。
+        # 所有正常路径都会先 detach（set_user_enabled / _restart），所以这里只在竞态中生效。
+        if self._session is not None and self._session.running:
+            return True, None
         self._capture_source = source or self._capture_source or self.default_source
         requested = device or self.device
         resolved, error = await self._resolve_device(self._capture_source, requested)
@@ -469,6 +488,7 @@ class HelperServer(object):
 
     async def stop_capture(self, announce=True):
         async with self._get_lock():
+            self._capture_epoch += 1        # 停止也是意图变化：让在飞的重启作废
             session = self._detach_locked()
         await self._join(session)
         if announce:
@@ -483,11 +503,26 @@ class HelperServer(object):
         switch_device 的回退）未必会再试一次，服务器就会停在
         `user_on=True + capturing=False` 的自相矛盾状态：页面断流、窗口按钮仍显示「暂停」，
         恢复要点两次。所以失败后必须走 `_recover_after_failed_restart` 收敛。
+
+        坑二（第八轮审查实测的 major S1/S2）：`await self._join(session)` 处**锁是放开的**
+        （关设备可能要等采集线程退出，不能占着锁）。间隙里可能落进：
+          * 用户点「暂停」（S1）→ 那次暂停会把 user_on 置 False 并接管清理，本次重启若照常
+            开设备，就得到 `user_on=False + capturing=True` 的矛盾会话（实测真实帧与静音帧
+            交错 3/3 复现）；
+          * 页面 onopen 自动发 start（S2）→ 它已经开出一个会话，本次重启再开就会把它
+            **覆盖**成没人 join 的孤儿（实测双会话各 ~50fps、暂停收不掉、backend 泄漏）。
+        因此 join 之后必须复查代次：只要中间发生过任何更新的意图，本次重启就作废。
         """
         async with self._get_lock():
+            self._capture_epoch += 1        # 本次重启拥有当前代次
+            epoch = self._capture_epoch
             session = self._detach_locked()
         await self._join(session)
         async with self._get_lock():
+            if epoch != self._capture_epoch:
+                return True, None           # 间隙里有更新的意图：别开设备，交给那次操作
+            if not self.user_on:
+                return True, None           # 用户已暂停（可能正是间隙里点的）
             ok, error = await self._open_locked(source)
         if not ok:
             await self._recover_after_failed_restart()

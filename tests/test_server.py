@@ -819,6 +819,80 @@ class SnapshotTest(ServerCase):
 
         self.with_server(body)
 
+    def _slow_close_backend(self, opened):
+        """造一个"关闭很慢"的后端：`_join` 会被拖住 ~0.3s，好让并发操作落进那个锁间隙。"""
+        class SlowCloseBackend(FakeBackend):
+            def open(self):
+                super().open()
+                opened.add(id(self))
+
+            def close(self):
+                time.sleep(0.3)
+                super().close()
+                opened.discard(id(self))
+
+        original = helper_server.create_backend
+        helper_server.create_backend = lambda source="system", backend="auto", device=None, \
+            rate=16000, frame_ms=20: SlowCloseBackend(source=source, device=device, rate=rate,
+                                                      frame_ms=frame_ms, value=0.5)
+        self.addCleanup(lambda: setattr(helper_server, "create_backend", original))
+
+    def test_pause_during_restart_gap_does_not_reopen_capture(self):
+        """重启的 join 间隙里点「暂停」：不得再开出会话（第八轮审查 S1，实测 3/3 复现）。
+
+        根因：`_restart` 在 `await self._join(session)` 处放开锁，间隙里用户点了「暂停」——
+        那次暂停把 user_on 置 False 并接管清理，而重启回来后**照常开设备**，于是得到
+        `userOn=False + capturing=True` 的自相矛盾态：真实帧与静音帧交错、窗口显示"已暂停"
+        却在采音频。修法：join 之后复查代次/开关，有更新的意图就作废本次重启。
+        """
+        opened = set()
+        self._slow_close_backend(opened)
+
+        async def body(_session):
+            ok, err = await self.server.set_user_enabled(True)
+            self.assertTrue(ok, err)
+            # 发起重启（切音源）→ 它会先 detach + 慢 join，锁在这个窗口里是放开的
+            restart = asyncio.ensure_future(self.server.switch_source("mic"))
+            await asyncio.sleep(0.1)                       # 让重启进到 join 间隙
+            self.assertTrue((await self.server.set_user_enabled(False))[0])   # 间隙里点暂停
+            await restart
+
+            snap = self.server.snapshot()
+            self.assertFalse(snap["userOn"], "暂停态")
+            self.assertTrue(snap["paused"], "状态必须自洽（paused=True）")
+            self.assertFalse(snap["capturing"], "★ S1：暂停后重启不得再开出会话来")
+            self.assertEqual(len(opened), 0, "不得留下打开的采集设备")
+
+        self.with_server(body)
+
+    def test_page_start_during_restart_gap_does_not_orphan_a_session(self):
+        """页面 start 落进重启间隙：不得把它的会话覆盖成孤儿（第八轮审查 S2，实测 2/2）。
+
+        根因：页面 WS onopen 会自动发 start，若它落在 `_restart` 的锁间隙里，
+        `start_capture` 见 `_session is None` 就开出一个会话，随后重启的 `_open_locked`
+        **无条件覆盖** `_session` —— 前一个会话没人 join/stop，变成并行推帧的孤儿
+        （实测双会话各 ~50fps、暂停后仍剩 1 个 running + backend 未 close）。
+        修法：页面 start 也推进代次（让在飞的重启作废）+ `_open_locked` 不覆盖存活会话。
+        """
+        opened = set()
+        self._slow_close_backend(opened)
+
+        async def body(_session):
+            ok, err = await self.server.set_user_enabled(True)
+            self.assertTrue(ok, err)
+            restart = asyncio.ensure_future(self.server.switch_source("mic"))
+            await asyncio.sleep(0.1)                       # 让重启进到 join 间隙
+            # 页面（或任何客户端）在这个间隙里请求开始
+            self.assertTrue((await self.server.start_capture("mic"))[0])
+            await restart
+
+            snap = self.server.snapshot()
+            self.assertTrue(snap["capturing"], "应该有一个会话在采")
+            self.assertEqual(len(opened), 1,
+                             "★ S2：只允许一个会话在采（双会话=孤儿，backend 会泄漏）")
+
+        self.with_server(body)
+
     def test_switch_device_failure_must_not_reopen_in_paused_state(self):
         """切设备失败、且已被恢复逻辑收敛（user_on=False）时：**不得**再"回退旧设备重开一次"。
 
