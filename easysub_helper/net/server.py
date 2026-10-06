@@ -412,6 +412,7 @@ class HelperServer(object):
                 # no-op 成功：也把上一次失败的提示清掉（独立审查抓的陈旧展示）
                 self.last_error = None
                 return True, None
+            error_seq = self._error_seq        # 快照：见函数尾部的清错误守卫（M-1）
             # 意图变化：让任何"在飞的重启"作废（第八轮审查 S1/S2 —— 重启间隙里点暂停/启动）
             self._capture_epoch += 1
             self.user_on = enabled
@@ -436,7 +437,13 @@ class HelperServer(object):
         self._sync_silence()
         if failure is not None:
             return False, failure
-        self.last_error = None             # 用户手动操作成功：上一次失败的提示就过时了（别再挂着）
+        # 用户手动操作成功：上一次失败的提示就过时了（别再挂着）。
+        # 坑（第十六轮审查实测的既存 minor M-1）：这里在 `await self._join(...)` **之后**，
+        # 锁早已释放 —— 期间并发派发的动作（例如设备解析失败、另一次启动失败）可能刚写下
+        # **真实的新错误**，无条件清会把窗口唯一的原因显示擦掉（GUI 只看 snapshot()["error"]）。
+        # 与 R13/R14-1 同一类：只有"本次等待期间没发生新错误"时才清。
+        if self._error_seq == error_seq:
+            self.last_error = None
         return True, None
 
     async def start_capture(self, source=None, device=None):

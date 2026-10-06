@@ -1105,6 +1105,39 @@ class SnapshotTest(ServerCase):
 
         self.with_server(body)
 
+    def test_error_written_during_pause_join_is_not_erased(self):
+        """暂停的 join 期间刚写下的错误，不得被这次"成功"擦掉（第十六轮 M-1）。
+
+        根因：`set_user_enabled` 在 `await self._join(...)` **之后**无条件清 `last_error`；
+        锁在那之前就释放了 —— 期间并发派发的动作（设备解析失败、另一次启动失败）刚写下的
+        **真实新错误**会被擦掉，而 GUI 状态行只认 `snapshot()["error"]`，于是窗口只剩
+        「已暂停」、不显示任何原因。修法：清之前比对 `_error_seq`。
+        """
+        opened = set()
+        self._slow_close_backend(opened)      # close 慢 → 拉长 join 窗口
+        orig = helper_server.audio_devices.resolve
+        helper_server.audio_devices.resolve = lambda source, device: (None, "找不到设备 ghost")
+        self.addCleanup(lambda: setattr(helper_server.audio_devices, "resolve", orig))
+
+        async def body(_session):
+            self.assertTrue((await self.server.set_user_enabled(True))[0])
+            pause = asyncio.ensure_future(self.server.set_user_enabled(False))
+            # 等暂停真的摘掉会话、进入慢 join（轮询可观测状态，不靠墙钟）
+            for _ in range(2000):
+                if self.server._session is None:
+                    break
+                await asyncio.sleep(0.002)
+            self.assertIsNone(self.server._session, "暂停应已摘掉会话（正在 join）")
+            # join 还没结束时，并发派发的动作失败并写下错误
+            ok, err = await self.server.switch_device("ghost")
+            self.assertFalse(ok)
+            self.assertEqual(self.server.snapshot()["error"], "找不到设备 ghost")
+            await pause
+            self.assertEqual(self.server.snapshot()["error"], "找不到设备 ghost",
+                             "★ M-1：join 期间刚写下的错误不得被擦掉（窗口要显示原因）")
+
+        self.with_server(body)
+
     def test_stale_device_switch_cannot_overwrite_a_newer_source_reset(self):
         """作废判定与 `device` 写入必须在**同一个锁块**里（第十五轮 N-1 实测的 TOCTOU）。
 
