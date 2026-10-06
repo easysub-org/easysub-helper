@@ -1029,6 +1029,36 @@ class SnapshotTest(ServerCase):
 
         self.with_server(body)
 
+    def test_capture_failure_during_device_switch_keeps_the_error_visible(self):
+        """切设备期间采集失败：窗口必须仍能显示失败原因（既存 minor，第十三轮审查实测 3/3）。
+
+        场景：采集中点「设备」下拉（慢解析）→ 解析期间采集挂了（失败回调把开关退回暂停、
+        致命 capture_failed 也广播出去了）→ 解析回来走"非采集态成功"分支，把**刚写的**
+        `last_error` 清成 None。结果：页面拿到了 fatal 错误，窗口却不再显示原因。
+        修法：清之前比对"错误代次"，只在等待期间没发生采集失败时才清。
+        """
+        self.use_fake_backend()
+        started, release = self._patch_resolve_by_device("设备A")
+
+        async def body(_session):
+            self.assertTrue((await self.server.set_user_enabled(True))[0])
+            current = self.server._session
+            loop = asyncio.get_event_loop()
+            slow = asyncio.ensure_future(self.server.switch_device("设备A"))
+            await loop.run_in_executor(None, started.wait, 5)   # 慢解析已挂住
+            # 解析期间采集挂了（当前会话的真错误）
+            self.server._on_capture_error(RuntimeError("device unplugged"), current)
+            await asyncio.sleep(0.05)                           # 让 loop 侧的错误处理跑完
+            self.assertFalse(self.server.snapshot()["userOn"], "错误应已把开关退回暂停")
+            release.set()                                       # 放行慢解析
+            await slow
+            snap = self.server.snapshot()
+            self.assertFalse(snap["capturing"])
+            self.assertEqual(snap["error"], "device unplugged",
+                             "★ 刚发生的采集失败不得被非采集态成功分支清掉（窗口要显示原因）")
+
+        self.with_server(body)
+
     def test_two_failing_sessions_do_not_swallow_the_current_error(self):
         """两条会话在同一 loop 排空窗口内报错：**当前会话**的致命错误必须仍被报出来。
 

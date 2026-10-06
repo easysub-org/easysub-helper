@@ -131,6 +131,12 @@ class HelperServer(object):
         #: 用途（并发审计 F3）：设备解析是慢 await，连点两次下拉时用序号判断"我的结果是否已
         #: 过期"，过期就丢弃 —— 否则慢解析的先点会覆盖后点的选择（实测最后点 B 却开到 A）。
         self._intent_seq = 0
+        #: 「致命采集错误」的代次：每次真的记下 `last_error` 就 +1。
+        #: 用途（第十三轮审查的既存 minor）：`switch_source`/`switch_device` 的"非采集态成功"
+        #: 分支要清陈旧的 `last_error`，但若这次等待期间**刚好发生了采集失败**（失败已把开关
+        #: 退回暂停、致命错误也广播出去了），那条错误一点都不过时 —— 清了之后窗口就不显示原因了。
+        #: 比对进入函数时的代次即可区分"陈旧"与"刚发生"。
+        self._error_seq = 0
         self._shutting_down = False
 
     # ---------------- 生命周期 ----------------
@@ -629,9 +635,11 @@ class HelperServer(object):
             # 优先于窗口新选的 default_source。实测：采 system → 暂停 → 切麦克风 → 再点启动，
             # 实际建的后端还是 system——用户"暂停换音源再启动"这一最常见操作被无声吞掉。
             self._capture_source = source
+            error_seq = self._error_seq   # 同上：只在等待期间没发生采集失败时才清陈旧错误
             holding = self._holding()
         if not holding:
-            self.last_error = None        # 切换成功：上一次失败的提示就过时了（暂停态切回可用音源）
+            if self._error_seq == error_seq:
+                self.last_error = None    # 切换成功且期间没出错：上一次失败的提示就过时了
             return True, None
         return await self._restart()
 
@@ -650,6 +658,7 @@ class HelperServer(object):
         async with self._get_lock():
             self._intent_seq += 1
             seq = self._intent_seq
+            error_seq = self._error_seq          # 快照：见下面"非采集态成功"分支的注释
             previous = self.device
             current_source = self._capture_source or self.default_source
         resolved, error = await self._resolve_device(current_source, requested)
@@ -665,7 +674,11 @@ class HelperServer(object):
         if not holding:
             # F5（并发审计 minor）：非采集态成功也要清陈旧错误，否则窗口会一直挂着
             # 上一次失败的红色「采集故障」（gui.py 的 error 分支排在 paused 之前）。
-            self.last_error = None
+            # 坑（第十三轮审查实测的既存 minor）：本次等待期间若**刚好发生采集失败**（解析慢，
+            # 失败回调挤进来了：开关已被退回暂停、致命 capture_failed 也广播出去了），那条错误
+            # 一点都不过时 —— 清了窗口就不再显示原因。用错误代次区分"陈旧"与"刚发生"。
+            if self._error_seq == error_seq:
+                self.last_error = None
             return True, None
         ok, error = await self._restart()
         if not ok:
@@ -830,6 +843,7 @@ class HelperServer(object):
             return
         # 到这里说明**出错的正是当前会话**：这才是真的采集挂了，按原契约收敛。
         self.last_error = str(exc)
+        self._error_seq += 1                 # 让"非采集态成功"分支知道这条错误是刚发生的
         self._emit_from_thread(("json", protocol.error(
             protocol.ERR_CAPTURE_FAILED, t("server.err.captureAborted", detail=str(exc)), True)))
         self._session = None
