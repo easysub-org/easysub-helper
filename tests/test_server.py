@@ -1105,6 +1105,54 @@ class SnapshotTest(ServerCase):
 
         self.with_server(body)
 
+    def test_stale_device_switch_cannot_overwrite_a_newer_source_reset(self):
+        """作废判定与 `device` 写入必须在**同一个锁块**里（第十五轮 N-1 实测的 TOCTOU）。
+
+        坑：R14-2 的修法把序号检查与 `self.device = …` 拆成两个锁块后不再原子 ——
+        `asyncio.Lock.acquire()` 在"有已被唤醒但还没跑的等待者"时会 await 让出，于是更晚的
+        `switch_source("mic")` 能插在"检查"与"写 device"之间推进序号并清掉 `device`，
+        随后旧解析又把 `device` 覆盖回旧设备名 → 破坏"换音源必须重置设备名"的不变量
+        （实测终态 `device='A'` + `source='mic'`；合并锁块后是 `device=None`）。
+        编排：A=切设备（慢解析）→ X=启动（**持锁**慢解析）→ 放行 A（A 排在 X 后）→
+        Z=切音源（排在 A 后）→ 放行 X。
+        """
+        gate_a, gate_x = threading.Event(), threading.Event()
+        started_a, started_x = threading.Event(), threading.Event()
+        orig = helper_server.audio_devices.resolve
+
+        def resolve(source, device):
+            if device == "A":
+                started_a.set()
+                gate_a.wait(timeout=5)
+            elif device == "USB":
+                started_x.set()
+                gate_x.wait(timeout=5)
+            return device, None
+
+        helper_server.audio_devices.resolve = resolve
+        self.addCleanup(lambda: setattr(helper_server.audio_devices, "resolve", orig))
+        self.use_fake_backend()
+
+        async def body(_session):
+            loop = asyncio.get_event_loop()
+            self.server.device = "USB"
+            a = asyncio.ensure_future(self.server.switch_device("A"))      # 慢解析
+            await loop.run_in_executor(None, started_a.wait, 5)
+            x = asyncio.ensure_future(self.server.set_user_enabled(True))  # 持锁慢解析
+            await loop.run_in_executor(None, started_x.wait, 5)
+            gate_a.set()                       # A 的解析回来 → A 去等锁（排在 X 后）
+            await self._wait_for_lock_waiters(1)          # 确定 A 已排上（不靠墙钟）
+            z = asyncio.ensure_future(self.server.switch_source("mic"))    # 排在 A 后
+            await self._wait_for_lock_waiters(2)          # 确定 Z 也排上了（顺序：A → Z）
+            gate_x.set()                       # X 完成 → 依次放行 A、Z
+            await asyncio.gather(a, x, z)
+            snap = self.server.snapshot()
+            self.assertEqual(snap["source"], "mic")
+            self.assertIsNone(snap["device"],
+                              "★ N-1：换音源必须重置设备名，旧解析不得再覆盖回 device")
+
+        self.with_server(body)
+
     def test_superseded_device_switch_does_not_write_a_stale_error(self):
         """已被更新点击作废的设备切换解析失败时：不得写错误、不得返回失败（R14-2）。
 
@@ -1164,6 +1212,24 @@ class SnapshotTest(ServerCase):
             self.assertIsNone(self.server._session, "死会话必须被摘掉")
 
         self.with_server(body)
+
+    async def _wait_for_lock_waiters(self, count):
+        """等到 `HelperServer` 的锁上出现至少 `count` 个等待者为止（确定性排序，不靠墙钟）。
+
+        坑（写这条测试时踩的）：只 `await asyncio.sleep(0)` 不能保证"A 先排队、Z 后排队" ——
+        A 的解析是在 executor 线程里返回的，回到事件循环要晚几拍；顺序错了就复现不出 N-1
+        （Z 先跑反而会让旧调用正确地判成过期，测试变成假绿）。
+        """
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            lock = self.server._get_lock()
+            if len(getattr(lock, "_waiters", None) or ()) >= count:
+                return
+            # 注意：这里必须**给真实时间**，不能只 `sleep(0)` —— A 的解析是在 executor 线程里
+            # 返回的，结果送回事件循环要等线程被唤醒（实测 `sleep(0)` 空转 2000 次仍可能不够，
+            # 会让编排偶发不成立 = flaky）。等锁队列填满是"带超时的等待"，不是靠紧凑竞态窗口。
+            await asyncio.sleep(0.002)
+        raise AssertionError("等不到 %d 个锁等待者（编排没成立）" % count)
 
     def _patch_resolve_by_device(self, slow_device, fast_s=0.05, slow_error=None):
         """按设备名给 `audio_devices.resolve` 不同行为：慢设备**挂在 Event 上**由测试放行。

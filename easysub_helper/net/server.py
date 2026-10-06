@@ -679,17 +679,22 @@ class HelperServer(object):
             previous = self.device
             current_source = self._capture_source or self.default_source
         resolved, error = await self._resolve_device(current_source, requested)
-        # 坑（第十四轮审查 R14-2）：**序号检查必须排在解析失败分支之前**。否则一次已被更新的
-        # 点击作废的慢解析，仍会在解析失败时写 `last_error` 并返回失败 —— 窗口红字「采集故障」
-        # 盖住正在进行的「采集中」（正是 R11-2 要避免的外溢），还会触发 GUI 重载下拉。
+        # 坑（第十四轮审查 R14-2 + 第十五轮审查 N-1）：序号检查、错误写入、`device` 写入
+        # **必须在同一个锁块里**：
+        #   · 检查要排在错误分支**之前**（R14-2）—— 否则一次已被更新的点击作废的慢解析，
+        #     仍会在解析失败时写 `last_error` 并返回失败：窗口红字「采集故障」盖住正在进行的
+        #     「采集中」（正是 R11-2 要避免的外溢），还会触发 GUI 重载下拉。
+        #   · 三者**不能拆成两次加锁**（N-1，实测新引入的 TOCTOU）—— `asyncio.Lock.acquire()`
+        #     在有等待者时会 await 让出，更晚的 `switch_source` 就能插在两次加锁之间推进序号
+        #     并清掉 `device`，随后旧解析又把 `device` 覆盖回旧设备名，破坏"换音源必须重置设备名"
+        #     的不变量（实测终态 `device='A'` + `source='mic'`）。
         async with self._get_lock():
             if seq != self._intent_seq:
                 # 期间有更新的一次窗口动作：丢弃本次结果（含错误），别覆盖用户最后的选择
                 return True, None
-        if error:
-            self._set_error(error)
-            return False, error
-        async with self._get_lock():
+            if error:
+                self._set_error(error)
+                return False, error
             self.device = resolved or requested
             holding = self._holding()
         if not holding:
