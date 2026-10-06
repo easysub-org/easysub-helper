@@ -485,6 +485,7 @@ class HelperServer(object):
         # 所有正常路径都会先 detach（set_user_enabled / _restart），所以这里只在竞态中生效。
         if self._session is not None and self._session.running:
             return True, None
+        error_seq = self._error_seq      # 成功路径清错误前要比对（见下面的 _clear_error_if_unchanged）
         # 防御（并发审计 F1/F6）：**持锁后再复查一遍"现在能不能开设备"**。
         # 页面消息里的暂停检查发生在拿锁之前；若那次启动随后失败把 user_on 退回 False
         # （或服务正在关闭），排队等锁的这次调用就会在暂停态把设备开出来 —— 实测终态
@@ -539,7 +540,9 @@ class HelperServer(object):
         # `server.stop()` 活着。把会话实例绑进闭包，身份判断才可靠。
         session.on_error = (lambda exc, bound=session: self._on_capture_error(exc, bound))
         self._state_sent = False
-        self.last_error = None
+        # 开设备成功 → 上一次失败的提示过时了；但若本次解析期间（持锁 await）刚发生新错误就不清
+        # （第十八轮审查的 nit：这一处以前直接 `= None`、绕过助手，让"唯一入口"的说法不成立）。
+        self._clear_error_if_unchanged(error_seq)
         self._session = session
         session.start()
         self._broadcast(("json", self._state_msg()))
@@ -548,11 +551,17 @@ class HelperServer(object):
     def _clear_error_if_unchanged(self, entry_seq):
         """清 `last_error` 的**唯一**入口：只有"从 `entry_seq` 快照以来没发生过新错误"时才清。
 
-        为什么要有这个助手（第十六/十七轮审查的既存 minor M-1 / F17-1）：判定"这条错误是否
-        过时"要靠 `_error_seq` 比对，而需要清错误的地方有 4 处（暂停/启动的两个分支 + 音源/设备
-        切换的"非采集态成功"分支）。以前每处各写一遍比对，结果 M-1（join 之后的清）和 F17-1
-        （no-op 分支的清）各漏了一处 —— 这正是"逐点打补丁"的失效模式。收敛成一个入口后，
-        新增清错误的地方只要调它、并传进入函数时的代次，就不可能再漏。
+        为什么要有这个助手（第十六/十七/十八轮审查的既存 minor M-1 / F17-1 + nit）：判定"这条
+        错误是否过时"要靠 `_error_seq` 比对，而需要清错误的地方共有 **5 处**：
+          1. `set_user_enabled` 的 no-op 分支（F17-1 漏过守卫的地方）；
+          2. `set_user_enabled` 尾部的成功清（M-1 漏过守卫的地方）；
+          3. `switch_source` 的"非采集态成功"分支（纯纵深防御）；
+          4. `switch_device` 的"非采集态成功"分支；
+          5. `_open_locked` 开设备成功后的清（第十八轮 nit：以前直接 `= None` 绕过助手）。
+        以前每处各写一遍比对，M-1 与 F17-1 各漏了一处 —— 这正是"逐点打补丁"的失效模式。
+        现在 5 处**全部**走这个入口（`grep -n "self.last_error"` 可核：非 None 写入只有
+        `_set_error`，清 None 只有本助手 + 构造函数里的初值）。新增清错误的地方只要调它、
+        并传"进入该操作时"的代次快照，就不可能再漏站点。
         """
         if self._error_seq == entry_seq:
             self.last_error = None
