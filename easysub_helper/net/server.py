@@ -610,11 +610,11 @@ class HelperServer(object):
             # 用户再点「启动」会叠出第二个会话（实测 stop 后 3 秒仍有 backend 未 close）。
             # 已被收敛时就直接报错：反正已暂停，下次点「启动」自然用回退后的设备。
             #
-            # 下面这一句是**纯防御**（第九轮审查指出它按当前设计不可达）：走到这里必然
-            # `_open_locked` 失败过，而失败时绝不会装上会话（`_session` 仍是 None）；
-            # 若间隙里有页面 start 抢开了会话，`_open_locked` 会走"不覆盖存活会话"提前返回
-            # True，于是根本进不来这个分支。留着的理由：`user_on=True + capturing=False`
-            # 正是我们反复修的那种"静音冻结"态，多一道兜底比省两行值。
+            # 下面这一句是**兜底**（第十轮审查用"解析慢失败 + 排队的页面 start 抢锁"确定性
+            # 命中过一次，所以别再说它不可达）：`_open_locked` 失败通常意味着没装上会话，
+            # 但若它持锁卡在解析 await 时被排队的 `start_capture` 抢先开会话，走到这里
+            # `_session` 就**可能**非 None —— 此时把设备回退后的会话重开一次是正确的
+            # （实测终态自洽：capturing=true / user_on=true / device=previous，无矛盾态）。
             if self._session is not None:
                 await self._restart()
             return False, error
