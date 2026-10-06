@@ -131,11 +131,16 @@ class HelperServer(object):
         #: 用途（并发审计 F3）：设备解析是慢 await，连点两次下拉时用序号判断"我的结果是否已
         #: 过期"，过期就丢弃 —— 否则慢解析的先点会覆盖后点的选择（实测最后点 B 却开到 A）。
         self._intent_seq = 0
-        #: 「致命采集错误」的代次：每次真的记下 `last_error` 就 +1。
-        #: 用途（第十三轮审查的既存 minor）：`switch_source`/`switch_device` 的"非采集态成功"
-        #: 分支要清陈旧的 `last_error`，但若这次等待期间**刚好发生了采集失败**（失败已把开关
-        #: 退回暂停、致命错误也广播出去了），那条错误一点都不过时 —— 清了之后窗口就不显示原因了。
+        #: 「错误」的代次：**每一处写非 None 的 `last_error` 都 +1**（统一走 `_set_error()`）。
+        #: 用途（第十三/十四轮审查的既存 minor）：`switch_source`/`switch_device` 的"非采集态成功"
+        #: 分支要清陈旧的 `last_error`，但若这次等待期间**刚写下了新错误**（采集运行中挂掉把开关
+        #: 退回暂停，或页面/窗口那次启动失败），那条错误一点都不过时 —— 清了之后窗口就不显示原因
+        #: （GUI 只认 `snapshot()["error"]`，且 gui.py 的 error 分支排在 paused 之前）。
         #: 比对进入函数时的代次即可区分"陈旧"与"刚发生"。
+        #:
+        #: 坑（第十四轮审查 R14-1）：这个 +1 以前只写在"采集运行中挂掉"那一条路径上，而
+        #: `last_error` 另有 4 个可达写入点没 +1 —— 于是"启动失败写下的新错误"会被在飞的切换
+        #: 动作按"代次相等"清掉（窗口什么都不显示）。现在所有非 None 写入都收敛到 `_set_error()`。
         self._error_seq = 0
         self._shutting_down = False
 
@@ -492,7 +497,7 @@ class HelperServer(object):
         self._capture_source = capture_source
         resolved, error = await self._resolve_device(capture_source, requested)
         if error:
-            self.last_error = error
+            self._set_error(error)
             return False, error
         # 坑（第十一轮审查）：解析是**慢 await**（pactl 数十~数百毫秒），期间可能刚开始关闭
         # 或用户点了暂停 —— 开头那次复查在 await 之前，不够。实测 `stop()` 恰好落在这段解析里时
@@ -508,7 +513,7 @@ class HelperServer(object):
                 frame_ms=self.frame_ms,
             )
         except BackendError as exc:
-            self.last_error = str(exc)
+            self._set_error(str(exc))
             return False, str(exc)
         session = CaptureSession(
             backend,
@@ -530,6 +535,15 @@ class HelperServer(object):
         session.start()
         self._broadcast(("json", self._state_msg()))
         return True, None
+
+    def _set_error(self, message):
+        """写 `last_error` 的**唯一**入口：所有"真的出错了"的写入都必须走这里。
+
+        它顺手推进 `_error_seq`，好让"非采集态成功"分支区分"陈旧的错误"与"本次等待期间
+        刚发生的新错误"（见 `_error_seq` 的注释）。**清错误（写 None）不要用它**。
+        """
+        self.last_error = message
+        self._error_seq += 1
 
     def _detach_locked(self):
         session, self._session = self._session, None
@@ -638,6 +652,9 @@ class HelperServer(object):
             error_seq = self._error_seq   # 同上：只在等待期间没发生采集失败时才清陈旧错误
             holding = self._holding()
         if not holding:
+            # 注（第十四轮审查）：本分支里 `error_seq` 快照与比对之间**没有 await**
+            # （唯一 await 是 holding=True 才走的 `_restart()`，那条路径根本不清错误），
+            # 所以这个守卫结构上不可达，纯纵深防御 —— 别以为它在承重。
             if self._error_seq == error_seq:
                 self.last_error = None    # 切换成功且期间没出错：上一次失败的提示就过时了
             return True, None
@@ -662,13 +679,17 @@ class HelperServer(object):
             previous = self.device
             current_source = self._capture_source or self.default_source
         resolved, error = await self._resolve_device(current_source, requested)
-        if error:
-            self.last_error = error
-            return False, error
+        # 坑（第十四轮审查 R14-2）：**序号检查必须排在解析失败分支之前**。否则一次已被更新的
+        # 点击作废的慢解析，仍会在解析失败时写 `last_error` 并返回失败 —— 窗口红字「采集故障」
+        # 盖住正在进行的「采集中」（正是 R11-2 要避免的外溢），还会触发 GUI 重载下拉。
         async with self._get_lock():
             if seq != self._intent_seq:
-                # 期间有更新的一次窗口动作：丢弃本次结果，别覆盖用户最后的选择
+                # 期间有更新的一次窗口动作：丢弃本次结果（含错误），别覆盖用户最后的选择
                 return True, None
+        if error:
+            self._set_error(error)
+            return False, error
+        async with self._get_lock():
             self.device = resolved or requested
             holding = self._holding()
         if not holding:
@@ -686,7 +707,7 @@ class HelperServer(object):
             async with self._get_lock():
                 if seq == self._intent_seq:
                     self.device = previous
-            self.last_error = error
+            self._set_error(error)
             # 坑（第七轮审查实测的 major）：`_restart` 失败时已由
             # `_recover_after_failed_restart` 把总开关退回「暂停」（user_on=False）。
             # 此时**不能**再无条件"回退旧设备再开一次"——那会在暂停态重开出会话：
@@ -830,7 +851,7 @@ class HelperServer(object):
         """loop 已不在/已关闭：就地收尾（进程多半在退出），只处理"还是出错的那个"。"""
         if session is not None and self._session is session:
             self._session = None
-            self.last_error = str(exc)
+            self._set_error(str(exc))
 
     def _finish_capture_error_on_loop(self, exc, session):
         if session is None or self._session is not session:
@@ -842,8 +863,7 @@ class HelperServer(object):
             # 只留日志（线程侧已记过），什么都不改 —— 当前会话不受任何影响。
             return
         # 到这里说明**出错的正是当前会话**：这才是真的采集挂了，按原契约收敛。
-        self.last_error = str(exc)
-        self._error_seq += 1                 # 让"非采集态成功"分支知道这条错误是刚发生的
+        self._set_error(str(exc))            # 走统一入口（顺手推进 _error_seq）
         self._emit_from_thread(("json", protocol.error(
             protocol.ERR_CAPTURE_FAILED, t("server.err.captureAborted", detail=str(exc)), True)))
         self._session = None

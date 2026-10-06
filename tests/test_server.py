@@ -1059,6 +1059,82 @@ class SnapshotTest(ServerCase):
 
         self.with_server(body)
 
+    def test_failed_start_error_survives_a_concurrent_device_switch(self):
+        """「启动」失败刚写下的错误，不得被在飞的（更早发起的）设备切换清掉（R14-1）。
+
+        根因（第十四轮审查实测）：`_error_seq` 以前只在"采集运行中挂掉"那一条路径 +1，
+        `_open_locked` 的解析/后端失败、切换失败等 4 个写入点不推进代次 → 一个更早发起、
+        仍在慢解析里的切换动作回来后按"代次相等"把它当成陈旧错误清掉。而 GUI 只认
+        `snapshot()["error"]`（gui.py 的 error 分支还排在 paused 之前），于是用户点「启动」
+        失败后窗口回到「已暂停」且**不显示任何原因**。
+        修法：所有非 None 写入统一走 `_set_error()`（内部推进代次）。
+        """
+        from easysub_helper.audio import BackendError
+
+        started, release = self._patch_resolve_by_device("设备A", slow_error=None)
+        calls = {"n": 0}
+
+        def fail_on_second_open(source="system", backend="auto", device=None,
+                                rate=16000, frame_ms=20):
+            calls["n"] += 1
+            if calls["n"] >= 2:                     # 用户那次「启动」失败
+                raise BackendError("device busy")
+            return FakeBackend(source=source, device=device, rate=rate,
+                               frame_ms=frame_ms, value=0.5)
+
+        orig = helper_server.create_backend
+        helper_server.create_backend = fail_on_second_open
+        self.addCleanup(lambda: setattr(helper_server, "create_backend", orig))
+
+        async def body(_session):
+            loop = asyncio.get_event_loop()
+            self.server.device = "USB Mic"
+            self.assertTrue((await self.server.set_user_enabled(True))[0])
+            # 更早发起的设备切换：慢解析（解析期间事件循环是空的，下面那次启动能挤进来）
+            slow = asyncio.ensure_future(self.server.switch_device("设备A"))
+            await loop.run_in_executor(None, started.wait, 5)
+            # 解析期间：用户点「暂停」再点「启动」，这次启动失败 → 写下新错误
+            self.assertTrue((await self.server.set_user_enabled(False))[0])
+            ok, err = await self.server.set_user_enabled(True)
+            self.assertFalse(ok, "这次启动应当失败：%r" % (err,))
+            self.assertEqual(self.server.snapshot()["error"], "device busy")
+            release.set()                                 # 放行那个慢解析
+            await slow
+            self.assertEqual(self.server.snapshot()["error"], "device busy",
+                             "★ R14-1：刚发生的启动失败不得被在飞的切换清掉（窗口要显示原因）")
+
+        self.with_server(body)
+
+    def test_superseded_device_switch_does_not_write_a_stale_error(self):
+        """已被更新点击作废的设备切换解析失败时：不得写错误、不得返回失败（R14-2）。
+
+        根因（第十四轮审查实测）：`switch_device` 的解析失败分支排在 `seq != _intent_seq`
+        检查**之前**：用户最后一次点击（可用设备）已生效、采集在跑，窗口却挂红色
+        「采集故障：慢设备找不到」—— 正是 R11-2 要避免的"陈旧错误盖住采集中"外溢；
+        而且作废的调用仍返回 (False, err)，会让 GUI 去重载下拉。
+        修法：序号检查提到错误写入之前，作废的调用直接 `return True, None`。
+        """
+        started, release = self._patch_resolve_by_device("慢设备", slow_error="找不到设备 慢设备")
+        self.use_fake_backend()
+
+        async def body(_session):
+            loop = asyncio.get_event_loop()
+            self.assertTrue((await self.server.set_user_enabled(True))[0])
+            slow = asyncio.ensure_future(self.server.switch_device("慢设备"))
+            await loop.run_in_executor(None, started.wait, 5)     # 慢设备解析挂住
+            # 用户紧接着点了可用设备：这次生效
+            ok, err = await self.server.switch_device("USB Mic")
+            self.assertTrue(ok, err)
+            release.set()                                        # 放行慢设备的解析（它会失败）
+            ok_stale, err_stale = await slow
+            snap = self.server.snapshot()
+            self.assertEqual(snap["device"], "USB Mic", "最后一次点击必须生效")
+            self.assertIsNone(snap["error"],
+                              "★ R14-2：作废的切换不得写下陈旧错误（窗口会红字盖住「采集中」）")
+            self.assertTrue(ok_stale, "作废的调用应静默成功，不该让 GUI 去重载下拉：%r" % (err_stale,))
+
+        self.with_server(body)
+
     def test_two_failing_sessions_do_not_swallow_the_current_error(self):
         """两条会话在同一 loop 排空窗口内报错：**当前会话**的致命错误必须仍被报出来。
 
@@ -1089,7 +1165,7 @@ class SnapshotTest(ServerCase):
 
         self.with_server(body)
 
-    def _patch_resolve_by_device(self, slow_device, fast_s=0.05):
+    def _patch_resolve_by_device(self, slow_device, fast_s=0.05, slow_error=None):
         """按设备名给 `audio_devices.resolve` 不同行为：慢设备**挂在 Event 上**由测试放行。
 
         坑（第十二轮审查）：原来用 `time.sleep(0.4)` + `await asyncio.sleep(0.1)` 的墙钟余量，
@@ -1105,6 +1181,8 @@ class SnapshotTest(ServerCase):
             if device == slow_device:
                 started.set()
                 release.wait(timeout=5)
+                if slow_error is not None:
+                    return None, slow_error      # 慢，且最终解析失败
             else:
                 time.sleep(fast_s)
             return device, None
