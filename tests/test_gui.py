@@ -15,6 +15,7 @@
 
 import asyncio
 import logging
+import gc
 import os
 import subprocess
 import sys
@@ -175,6 +176,15 @@ class _LoopOnlyWindow(gui.HelperWindow):
             self._loop = None
 
 
+#: 测试里被替换/摘掉的 Tk 图片必须**留住引用**。
+#: 坑（CI 实测的 core dump，exit 134）：`PhotoImage` 一旦变成浮动对象，GC 可能在 **worker 线程**
+#: 里回收它 → Tkinter 会在非主线程执行 `image delete` → `RuntimeError: main thread is not in
+#: main loop`，紧接着 `Tcl_AsyncDelete: async handler deleted by the wrong thread` → **整个
+#: GUI 作业 core dumped**（py3.8/ubuntu 上实测；py3.12 只是碰巧没触发）。真实代码里
+#: `gui._set_window_icon` 早就"留引用来防 GC"，测试同样不能把引用丢掉。
+_KEPT_TK_IMAGES = []
+
+
 class WindowCase(unittest.TestCase):
     WINDOW_CLASS = _WindowWithoutServer
     FAKE_BACKEND = False
@@ -194,7 +204,21 @@ class WindowCase(unittest.TestCase):
         self.window.root.withdraw()
         self.window.root.update()
 
+    def _stash_icon_reference(self):
+        """把窗口当前持有的图标图片转移到模块级列表（见 `_KEPT_TK_IMAGES` 的注释）。
+
+        测试需要"窗口手里没有旧图标"这个前提时用它，**不要**直接 `pop` 丢掉引用。
+        """
+        image = self.window.__dict__.pop("_window_icon", None)
+        if image is not None:
+            _KEPT_TK_IMAGES.append(image)
+
     def tearDown(self):
+        # 兜底（两层）：先把窗口手里的图标转移到模块级列表（这样窗口对象被回收时也不会连带
+        # 触发 Tk 图片的 __del__），再在**主线程**把其它浮动对象收干净 —— 都不能留到 worker
+        # 线程里回收（见 _KEPT_TK_IMAGES 的注释：非主线程 `image delete` 会 core dump）。
+        self._stash_icon_reference()
+        gc.collect()
         try:
             self.window.quit()
         except Exception:  # noqa: BLE001
@@ -256,7 +280,7 @@ class WindowTest(WindowCase):
         from easysub_helper import config as cfg
 
         calls = []
-        self.window.__dict__.pop("_window_icon", None)          # 清掉构造时留下的 PNG 引用
+        self._stash_icon_reference()                             # 清掉构造时留下的 PNG 引用（留着别丢）
         with mock.patch.object(cfg, "is_windows", return_value=True), \
                 mock.patch.object(self.window.root, "iconbitmap",
                                   side_effect=lambda *a, **k: calls.append((a, k))):
@@ -270,6 +294,21 @@ class WindowTest(WindowCase):
         self.assertNotIn("_window_icon", self.window.__dict__,
                          "Windows 上 ico 成功后不该再叠加 iconphoto(PNG)")
 
+    def test_detached_window_icon_keeps_a_python_reference(self):
+        """从窗口摘下的 Tk 图片**必须留住引用**，不许裸 `pop` 丢掉。
+
+        坑（CI 实测的 core dump，exit 134）：浮动 `PhotoImage` 被 GC 时若 GC 跑在 worker 线程里，
+        Tkinter 会从非主线程执行 `image delete` → `Tcl_AsyncDelete: async handler deleted by the
+        wrong thread` → 整个 GUI 作业 core dumped。py3.8/ubuntu 上真实发生过，就是被这条不变量
+        的前身（裸 `pop`）触发的；py3.12 只是碰巧没触发。
+        """
+        before = len(_KEPT_TK_IMAGES)
+        self._stash_icon_reference()
+        self.assertEqual(len(_KEPT_TK_IMAGES), before + 1,
+                         "★ 摘下的图标必须进 _KEPT_TK_IMAGES（留住引用），不能直接丢掉")
+        self.assertNotIn("_window_icon", self.window.__dict__,
+                         "摘下来之后窗口手里就不该再有这个引用（本用例的前提）")
+
     def test_window_icon_actually_calls_iconphoto(self):
         """必须**真的调用** iconphoto —— 只记状态不调用就是"图标没换上"。
 
@@ -282,7 +321,7 @@ class WindowTest(WindowCase):
             self.skipTest("Windows 走 iconbitmap(.ico)，不调用 iconphoto")
         if not self._tk_supports_png():
             self.skipTest("Tk < 8.6：不支持 PNG 图标（iconphoto 到不了）")
-        self.window.__dict__.pop("_window_icon", None)
+        self._stash_icon_reference()
         calls = []
         with mock.patch.object(self.window.root, "iconphoto",
                                side_effect=lambda *a, **k: calls.append((a, k))):
