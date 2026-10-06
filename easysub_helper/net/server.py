@@ -127,6 +127,10 @@ class HelperServer(object):
         #: 保留它是因为"意图变化"这个语义足够便宜、能让未来新增的间隙路径自动被覆盖；
         #: 但**别再声称哪条测试是靠它变红的**。
         self._capture_epoch = 0
+        #: 「窗口意图」的序号：每次 switch_source / switch_device 在**锁内** +1。
+        #: 用途（并发审计 F3）：设备解析是慢 await，连点两次下拉时用序号判断"我的结果是否已
+        #: 过期"，过期就丢弃 —— 否则慢解析的先点会覆盖后点的选择（实测最后点 B 却开到 A）。
+        self._intent_seq = 0
         self._shutting_down = False
 
     # ---------------- 生命周期 ----------------
@@ -209,6 +213,9 @@ class HelperServer(object):
     async def stop(self):
         self._shutting_down = True
         self.user_on = False
+        # 关闭也是一次意图变化（并发审计 F6）：让在飞的重启/开设备作废，
+        # 免得关闭瞬间还去真开一次设备（`_open_locked` 也会用 `_shutting_down` 兜住）。
+        self._capture_epoch += 1
         try:
             await self.stop_capture(announce=False)
         except Exception:  # noqa: BLE001 - 收尾路径上不抛
@@ -419,6 +426,13 @@ class HelperServer(object):
         async with self._get_lock():
             if self._session is not None and self._session.running:
                 return True, None          # 已在采：多客户端共享同一会话，不算错
+            # 坑（并发审计实测的 major F1）：**锁内复查总开关**。页面消息里的暂停检查发生在
+            # 拿锁之前（`_on_client_message`），若排队的这次 start 等到锁时"用户那次启动刚好
+            # 失败、开关已退回暂停"，不复查就会在暂停态把设备开出来 —— 实测
+            # `userOn=False + capturing=True`，真实帧与静音帧各 50fps 并存、窗口显示"已暂停"。
+            # 契约是"页面 start 只是意图，绝不自己开设备"，这里就是那条契约的落点。
+            if not self.user_on:
+                return False, t("server.err.paused")
             # 页面 start 也是一次"意图变化"：让在飞的重启作废，否则它随后会把这里刚开的
             # 会话**覆盖**成没人 join 的孤儿（第八轮审查 S2 实测双会话 + backend 泄漏）。
             self._capture_epoch += 1
@@ -444,15 +458,27 @@ class HelperServer(object):
         # 所有正常路径都会先 detach（set_user_enabled / _restart），所以这里只在竞态中生效。
         if self._session is not None and self._session.running:
             return True, None
-        self._capture_source = source or self._capture_source or self.default_source
+        # 防御（并发审计 F1/F6）：**持锁后再复查一遍"现在能不能开设备"**。
+        # 页面消息里的暂停检查发生在拿锁之前；若那次启动随后失败把 user_on 退回 False
+        # （或服务正在关闭），排队等锁的这次调用就会在暂停态把设备开出来 —— 实测终态
+        # `userOn=False + capturing=True` 粘住、真实帧与静音帧各 50fps 并存，窗口却显示
+        # "已暂停"（并发审计 H5 确定性复现）。把不变量收在锁内，一处兜住所有入口。
+        if self._shutting_down or not self.user_on:
+            return False, t("server.err.paused")
+        # 意图快照（并发审计 F4）：await 之后**不再重读 `self.*`**。以前是"await 前写
+        # `_capture_source`、await 后读它"，于是设备可能按旧音源解析出来，却配给新音源用
+        # （实测 `create_backend(source='mic', device='alsa_output…monitor')`：以为在采麦克风，
+        #  实际拿到系统回环，Linux 上 parec 还会"静默成功"）。
+        capture_source = source or self._capture_source or self.default_source
         requested = device or self.device
-        resolved, error = await self._resolve_device(self._capture_source, requested)
+        self._capture_source = capture_source
+        resolved, error = await self._resolve_device(capture_source, requested)
         if error:
             self.last_error = error
             return False, error
         try:
             backend = create_backend(
-                source=self._capture_source,
+                source=capture_source,
                 backend=self.backend,
                 device=resolved or requested,
                 rate=self.rate,
@@ -467,9 +493,14 @@ class HelperServer(object):
             self.frame_ms,
             on_frame=self._on_frame,
             on_level=self._on_level,
-            on_error=self._on_capture_error,
+            on_error=None,          # 构造完立刻绑定到**这个实例**（见下），别用 self._session 现读
             level_interval_ms=config.LEVEL_INTERVAL_MS,
         )
+        # 坑（并发审计 F2）：错误回调以前在采集线程里现读 `self._session` 判断"谁出错了"——
+        # 旧会话在 `session.stop` 排队（默认线程池被慢解析占住）时抛错，会被认成新会话：
+        # 新会话被当成出错的清掉、且没人 join → 孤儿继续推帧、backend 泄漏，实测甚至能跨过
+        # `server.stop()` 活着。把会话实例绑进闭包，身份判断才可靠。
+        session.on_error = (lambda exc, bound=session: self._on_capture_error(exc, bound))
         self._state_sent = False
         self.last_error = None
         self._session = session
@@ -568,16 +599,21 @@ class HelperServer(object):
         source = source or self.default_source
         if source not in ("system", "mic"):
             return False, t("protocol.bad.badSource", source=source)
-        if source != self.default_source:
-            self.device = None
-        self.default_source = source
-        # 坑（全盲审查实测的 major）：**非采集态也要同步 `_capture_source`**。它一旦采集过就
-        # 永久残留，而 `set_user_enabled(True)` 重开时 `_open_locked()` 不带 source → 残留值
-        # 优先于窗口新选的 default_source。实测：采 system → 暂停 → 切麦克风 → 再点启动，
-        # 实际建的后端还是 system（snapshot/WS state 都报 system）——用户"暂停换音源再启动"
-        # 这一最常见操作被无声吞掉。这里直接同步，窗口操作永远高于残留。
-        self._capture_source = source
-        if not self._holding():
+        # 坑（并发审计实测的 major F3）：窗口意图的**读改写必须收进锁**。以前这几行在锁外跑，
+        # 与在飞的 `_open_locked`（持锁 await 解析设备）或另一次窗口动作互相覆盖：
+        # 实测"设备切换在飞时点音源"会把用户最后一次切换静默收敛成暂停+报错。
+        async with self._get_lock():
+            self._intent_seq += 1
+            if source != self.default_source:
+                self.device = None
+            self.default_source = source
+            # 坑（全盲审查实测的 major）：**非采集态也要同步 `_capture_source`**。它一旦采集过就
+            # 永久残留，而 `set_user_enabled(True)` 重开时 `_open_locked()` 不带 source → 残留值
+            # 优先于窗口新选的 default_source。实测：采 system → 暂停 → 切麦克风 → 再点启动，
+            # 实际建的后端还是 system——用户"暂停换音源再启动"这一最常见操作被无声吞掉。
+            self._capture_source = source
+            holding = self._holding()
+        if not holding:
             self.last_error = None        # 切换成功：上一次失败的提示就过时了（暂停态切回可用音源）
             return True, None
         return await self._restart()
@@ -589,19 +625,37 @@ class HelperServer(object):
         （Linux 上 parec 对未知设备名是静默回落默认源的，是最坑的一种表现）。
         """
         requested = device or None
-        resolved, error = await self._resolve_device(
-            self._capture_source or self.default_source, requested)
+        # 坑（并发审计实测的 major F3）：以前解析（**慢**，pactl 数十~数百毫秒）在锁外、写完
+        # `self.device` 也不复查 —— 连点两次设备下拉时，"解析快的后点"先写、慢解析的先点后写，
+        # 结果**用户最后一次点击失效**（实测：最后点设备B，实际开到设备A，且因为返回成功、
+        # GUI 不会重载下拉，窗口显示 B 而声音是 A —— 项目最忌讳的"切了但没变"）。
+        # 这里用意图序号：每次窗口动作 +1，解析回来后若已过期就丢弃本次结果。
+        async with self._get_lock():
+            self._intent_seq += 1
+            seq = self._intent_seq
+            previous = self.device
+            current_source = self._capture_source or self.default_source
+        resolved, error = await self._resolve_device(current_source, requested)
         if error:
             self.last_error = error
             return False, error
-        previous = self.device
-        self.device = resolved or requested
-        if not self._holding():
+        async with self._get_lock():
+            if seq != self._intent_seq:
+                # 期间有更新的一次窗口动作：丢弃本次结果，别覆盖用户最后的选择
+                return True, None
+            self.device = resolved or requested
+            holding = self._holding()
+        if not holding:
+            # F5（并发审计 minor）：非采集态成功也要清陈旧错误，否则窗口会一直挂着
+            # 上一次失败的红色「采集故障」（gui.py 的 error 分支排在 paused 之前）。
+            self.last_error = None
             return True, None
         ok, error = await self._restart()
         if not ok:
             # 打不开就退回原设备，并且如实报错（否则用户以为"切了但声音没变"）
-            self.device = previous
+            async with self._get_lock():
+                if seq == self._intent_seq:
+                    self.device = previous
             self.last_error = error
             # 坑（第七轮审查实测的 major）：`_restart` 失败时已由
             # `_recover_after_failed_restart` 把总开关退回「暂停」（user_on=False）。
@@ -625,8 +679,13 @@ class HelperServer(object):
         """暂停且有人连着 → 起静音 ticker（保持流不断）；否则停掉。只在事件循环里调。
 
         坑：`self._silence_task` 的引用**只在这里改**（ticker 自己不许动它，见 _silence_loop）。
+
+        坑二（并发审计 F1）：`want` 里加了 `self._session is None` —— 让"静音 ticker 与活会话
+        并存"在结构上不可能。以前一旦出现矛盾态（`user_on=False` 但会话还在采），页面会同时
+        收到真实帧与静音帧（实测各 50fps，额定 50 → 实际 ~100 msg/s）。
         """
-        want = (not self.user_on) and bool(self._queues) and not self._shutting_down
+        want = ((not self.user_on) and self._session is None
+                and bool(self._queues) and not self._shutting_down)
         if want:
             if self._silence_task is None or self._silence_task.done():
                 self._silence_task = asyncio.ensure_future(self._silence_loop())
@@ -707,17 +766,24 @@ class HelperServer(object):
                            "at": time.monotonic()}
         self._emit_from_thread(("json", protocol.level(info["rms"], info["peak"])))
 
-    def _on_capture_error(self, exc):
+    def _on_capture_error(self, exc, session=None):
         # 这个回调跑在**采集线程**里：直接改 self._session 会与事件循环侧的 _detach_locked 并发。
         # 先记日志，再把「上报错误 + 清会话」丢回事件循环执行（复用既有的跨线程桥）。
         LOG.warning(t("log.captureFailed", error=exc))
         self.last_error = str(exc)
-        session = self._session
+        # 坑（并发审计实测的 major F2）：**用回调绑定的会话实例**，不要在这里现读 self._session。
+        # 采集线程与事件循环并发，旧会话在 `session.stop` 排队（默认线程池被慢解析占住）时抛错，
+        # 现读会把旧会话的错误认到新会话头上：新会话被清掉且没人 join → 孤儿推帧 + backend 泄漏
+        # （实测甚至跨过 server.stop() 还活着）。`session=None` 只作兼容兜底。
+        if session is None:
+            session = self._session
         # 存**对象引用**而不是 id()：旧会话若在排队窗口内被 GC，新会话可能复用同一 id()
         self._error_session = session
         loop = self._loop
         if loop is None or loop.is_closed():
-            self._session = None            # 循环没了：只能就地收尾（进程多半在退出）
+            # 循环没了：只能就地收尾（进程多半在退出）——同样只清"还是出错的那个"
+            if self._session is session:
+                self._session = None
             return
         loop.call_soon_threadsafe(self._finish_capture_error_on_loop, exc)
 

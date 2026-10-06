@@ -938,6 +938,85 @@ class SnapshotTest(ServerCase):
 
         self.with_server(body)
 
+    def test_queued_page_start_must_not_open_device_while_paused(self):
+        """自己那次「启动」失败后，排队的页面 start 不得在暂停态把设备开出来（并发审计 F1）。
+
+        契约：**页面 start 只是意图，绝不自己开设备**。触发链：用户点「启动」→ `_open_locked`
+        持锁卡在设备解析（pactl，数十~数百毫秒）→ 此窗口里页面 WS 发来 start（它看到的
+        `paused=false`，因为 user_on 已被置 True）→ 用户那次启动失败、把 user_on 退回 False
+        → 锁释放后**排队的 start 拿到锁**：不复查就会在暂停态把设备开出来，终态
+        `userOn=False + capturing=True` 粘住，页面真实帧与静音帧各 ~50fps 并存（实测）。
+
+        哪一条在承重（我自己的变异结论，别再说反了）：**`_open_locked` 顶部那道兜底**
+        （`if self._shutting_down or not self.user_on`）。只删 `start_capture` 里的复查这条
+        测试**仍是绿的**（被兜底接住）；把两道都删掉它才会红。`start_capture` 那道的作用是
+        让页面拿到正确的 `ERR_PAUSED` 契约、而不是让它去尝试开设备。
+        """
+        from easysub_helper.audio import BackendError
+
+        opened = []
+
+        def slow_resolve(source, device):
+            time.sleep(0.3)                       # 拖住锁，让页面 start 排队
+            return device or "default-dev", None
+
+        def failing_open(source="system", backend="auto", device=None, rate=16000, frame_ms=20):
+            opened.append(source)
+            raise BackendError("device busy")     # 用户这次启动失败
+
+        orig_resolve = helper_server.audio_devices.resolve
+        orig_create = helper_server.create_backend
+        helper_server.audio_devices.resolve = slow_resolve
+        helper_server.create_backend = failing_open
+
+        def restore():
+            helper_server.audio_devices.resolve = orig_resolve
+            helper_server.create_backend = orig_create
+
+        self.addCleanup(restore)
+
+        async def body(_session):
+            # 让本次启动走"带设备名"的解析路径（device 为空时 _resolve_device 直接返回、不 await）
+            self.server.device = "USB Mic"
+            enable = asyncio.ensure_future(self.server.set_user_enabled(True))
+            await asyncio.sleep(0.1)              # 让它进到解析 await（此时锁被持有）
+            page = asyncio.ensure_future(self.server.start_capture("system"))   # 页面 start 排队
+            ok, err = await enable
+            self.assertFalse(ok, "用户这次启动应当失败：%r" % (err,))
+            pok, perr = await page
+            self.assertFalse(pok, "★ F1：暂停态下页面 start 不得成功（%r）" % (perr,))
+            snap = self.server.snapshot()
+            self.assertFalse(snap["userOn"], "总开关已退回暂停")
+            self.assertFalse(snap["capturing"], "★ F1：暂停态不得有会话在采")
+            self.assertIsNone(self.server._session, "不得留下没人管的会话")
+            self.assertEqual(opened, ["system"], "只允许那一次失败的尝试：opened=%r" % opened)
+
+        self.with_server(body)
+
+    def test_capture_error_is_attributed_to_the_bound_session(self):
+        """旧会话的迟到错误不得记到新会话头上（并发审计 F2：否则新会话成孤儿、backend 泄漏）。
+
+        以前 `_on_capture_error` 跑在采集线程里**现读 `self._session`** 判断"谁出错了"：
+        旧会话在 `session.stop` 排队（默认线程池被慢解析占住）时抛错，就会被认成新会话 →
+        新会话被清掉且**没人 join** → 孤儿继续推帧、backend 泄漏（实测甚至跨过 server.stop()
+        还活着）。修法：错误回调在构造后绑定到自己的会话实例。
+        """
+        async def body(_session):
+            self.assertTrue((await self.server.set_user_enabled(True))[0])
+            old = self.server._session
+            self.assertIsNotNone(old)
+            self.assertTrue((await self.server.switch_source("mic"))[0])
+            new = self.server._session
+            self.assertIsNot(old, new, "换音源后应当是新会话")
+            # 旧会话"迟到"的错误回调（用它的**绑定**回调，模拟采集线程在排队窗口后才报错）
+            old.on_error(RuntimeError("stale session failed"))
+            await asyncio.sleep(0.05)             # 等 call_soon_threadsafe 的回调跑完
+            self.assertIs(self.server._session, new, "★ F2：新会话不得被旧会话的错误清掉")
+            self.assertTrue(new.running, "★ F2：新会话必须还在跑（不能变成没人 join 的孤儿）")
+            self.assertTrue(self.server.snapshot()["capturing"], "新会话仍应在采")
+
+        self.with_server(body)
+
     def test_switch_device_failure_must_not_reopen_in_paused_state(self):
         """切设备失败、且已被恢复逻辑收敛（user_on=False）时：**不得**再"回退旧设备重开一次"。
 
