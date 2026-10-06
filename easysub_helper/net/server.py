@@ -161,6 +161,10 @@ class HelperServer(object):
         return app
 
     async def start(self):
+        # 坑（第十一轮审查）：`_shutting_down` 以前只置位不复位，是个**永久闩锁** ——
+        # `stop()` → `start()` 之后 `_open_locked` 会永远拒绝开设备（实测永远采不了）。
+        # 当前 GUI/CLI 生命周期不会复用同一个 HelperServer，所以不可达；但复位一行更安全。
+        self._shutting_down = False
         self._loop = _running_loop()
         self._runner = web.AppRunner(self.build_app(), access_log=None)
         await self._runner.setup()
@@ -215,6 +219,9 @@ class HelperServer(object):
         self.user_on = False
         # 关闭也是一次意图变化（并发审计 F6）：让在飞的重启/开设备作废，
         # 免得关闭瞬间还去真开一次设备（`_open_locked` 也会用 `_shutting_down` 兜住）。
+        #
+        # 诚实说明（第十一轮审查的变异结论）：删掉这一行**零差异** —— `stop()` 已把
+        # `user_on=False`，`_restart` 自己的复查就挡住了。属纵深防御，别声称它承重。
         self._capture_epoch += 1
         try:
             await self.stop_capture(announce=False)
@@ -469,6 +476,11 @@ class HelperServer(object):
         # `_capture_source`、await 后读它"，于是设备可能按旧音源解析出来，却配给新音源用
         # （实测 `create_backend(source='mic', device='alsa_output…monitor')`：以为在采麦克风，
         #  实际拿到系统回环，Linux 上 parec 还会"静默成功"）。
+        #
+        # 诚实说明（第十一轮审查的变异结论）：把这里改回"await 后重读"**看不出任何差异** ——
+        # 真正承重的是 F3 把窗口意图的读改写收进了锁（`_open_locked` 持锁跨过 await，锁内
+        # 再没人能改 `_capture_source`）。这行局部快照是纵深防御：将来若有人把某段状态写入
+        # 挪回锁外，这里还能兜住。
         capture_source = source or self._capture_source or self.default_source
         requested = device or self.device
         self._capture_source = capture_source
@@ -476,6 +488,11 @@ class HelperServer(object):
         if error:
             self.last_error = error
             return False, error
+        # 坑（第十一轮审查）：解析是**慢 await**（pactl 数十~数百毫秒），期间可能刚开始关闭
+        # 或用户点了暂停 —— 开头那次复查在 await 之前，不够。实测 `stop()` 恰好落在这段解析里时
+        # 设备仍会被真开一次（终态自洽、无泄漏，但没必要真去碰一次麦克风）。这里再复查一次。
+        if self._shutting_down or not self.user_on:
+            return False, t("server.err.paused")
         try:
             backend = create_backend(
                 source=capture_source,
@@ -770,7 +787,9 @@ class HelperServer(object):
         # 这个回调跑在**采集线程**里：直接改 self._session 会与事件循环侧的 _detach_locked 并发。
         # 先记日志，再把「上报错误 + 清会话」丢回事件循环执行（复用既有的跨线程桥）。
         LOG.warning(t("log.captureFailed", error=exc))
-        self.last_error = str(exc)
+        # 坑（第十一轮审查的 major 新缝）：`last_error` **不在线程侧写**。以前无条件写，于是
+        # "陈旧会话的迟到错误"会把窗口挂上红色「采集故障」（gui.py 的 error 分支排在 capturing
+        # 之前），而当前会话其实好好在采。改为回到 loop 侧、判过会话身份再写。
         # 坑（并发审计实测的 major F2）：**用回调绑定的会话实例**，不要在这里现读 self._session。
         # 采集线程与事件循环并发，旧会话在 `session.stop` 排队（默认线程池被慢解析占住）时抛错，
         # 现读会把旧会话的错误认到新会话头上：新会话被清掉且没人 join → 孤儿推帧 + backend 泄漏
@@ -781,29 +800,35 @@ class HelperServer(object):
         self._error_session = session
         loop = self._loop
         if loop is None or loop.is_closed():
-            # 循环没了：只能就地收尾（进程多半在退出）——同样只清"还是出错的那个"
+            # 循环没了：只能就地收尾（进程多半在退出）——同样只处理"还是出错的那个"
             if self._session is session:
                 self._session = None
+                self.last_error = str(exc)
             return
         loop.call_soon_threadsafe(self._finish_capture_error_on_loop, exc)
 
     def _finish_capture_error_on_loop(self, exc):
+        failing = getattr(self, "_error_session", None)
+        self._error_session = None          # 引用用完即放,别把旧会话(含 backend/线程)钉住
+        if failing is None or self._session is not failing:
+            # 坑（第十一轮审查实测的 major 新缝）：**陈旧会话的迟到错误到此为止**。
+            # 它已经不是当前会话了；若还写 last_error、还广播 fatal=true 的 capture_failed：
+            #   ① 窗口显示红色「采集故障」压住「采集中」，而音频其实一直在流；
+            #   ② 该码**不在** HELPER_SILENT_CODES 里，页面宿主会走 toPanel({type:'ERROR'})
+            #      → background cleanupAll，把整场会话连模型一起拆掉。
+            # 只留日志（线程侧已记过），什么都不改 —— 当前会话不受任何影响。
+            return
+        # 到这里说明**出错的正是当前会话**：这才是真的采集挂了，按原契约收敛。
+        self.last_error = str(exc)
         self._emit_from_thread(("json", protocol.error(
             protocol.ERR_CAPTURE_FAILED, t("server.err.captureAborted", detail=str(exc)), True)))
-        # 这里执行时用户可能已经重新 start_capture 出了**新会话**（排队期间点开始），
-        # 只清"还是出错的那个"——拿 session 生成序号对比，别把新会话误杀
-        session = self._session
-        # 只清"出错的那个会话"：如果排队期间用户已经 start_capture 出了新会话，
-        # 身份不同（is 比较不受 id 复用影响），绝不能把新会话误杀
-        if session is not None and session is getattr(self, "_error_session", None):
-            self._session = None
-            # 坑（独立审查抓的 minor）：采集挂了却把总开关留在「启动」上，会得到一个
-            # 自相矛盾的状态：paused=false + capturing=false —— 窗口按钮仍显示「暂停」，
-            # 用户必须先点暂停再点启动才能重试；而且 _sync_silence 认为"用户要采"，
-            # 连静音帧都不推，页面那边彻底断流（时间轴停住、波形冻死）。
-            # 把开关退回暂停态：按钮变回「启动」（一键重试），静音帧继续推（页面契约不变）。
-            self.user_on = False
-        self._error_session = None          # 引用用完即放,别把旧会话(含 backend/线程)钉住
+        self._session = None
+        # 坑（独立审查抓的 minor）：采集挂了却把总开关留在「启动」上，会得到一个
+        # 自相矛盾的状态：paused=false + capturing=false —— 窗口按钮仍显示「暂停」，
+        # 用户必须先点暂停再点启动才能重试；而且 _sync_silence 认为"用户要采"，
+        # 连静音帧都不推，页面那边彻底断流（时间轴停住、波形冻死）。
+        # 把开关退回暂停态：按钮变回「启动」（一键重试），静音帧继续推（页面契约不变）。
+        self.user_on = False
         self._emit_from_thread(("json", self._state_msg()))
         # 开关退回暂停后要立刻让静音 ticker 接上（页面那条流不能断）
         self._sync_silence()
