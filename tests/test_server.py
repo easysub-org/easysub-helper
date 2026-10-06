@@ -1105,6 +1105,44 @@ class SnapshotTest(ServerCase):
 
         self.with_server(body)
 
+    def test_pause_noop_does_not_erase_a_fresh_error(self):
+        """「启动」失败后紧跟的「暂停」（no-op 分支）不得擦掉刚写下的失败原因（第十七轮 F17-1）。
+
+        路径：用户点「启动」（慢解析、注定失败）→ 解析窗口里按钮已变「暂停」→ 用户点「暂停」，
+        这个协程排在启动的锁后面；启动失败时 `_set_error()` 写入原因并把开关退回暂停 →
+        暂停拿到锁后命中 no-op 分支（`enabled == user_on`）→ 以前在锁内**无条件**清错误，
+        于是窗口只剩「已暂停」、不显示任何原因（GUI 只认 `snapshot()["error"]`）。
+        修法：代次快照挪到**加锁之前**，no-op 分支也走 `_clear_error_if_unchanged()`。
+        """
+        from easysub_helper.audio import BackendError
+
+        started, release = self._patch_resolve_by_device("USB")
+
+        def failing_open(source="system", backend="auto", device=None, rate=16000, frame_ms=20):
+            raise BackendError("device busy")
+
+        orig = helper_server.create_backend
+        helper_server.create_backend = failing_open
+        self.addCleanup(lambda: setattr(helper_server, "create_backend", orig))
+
+        async def body(_session):
+            loop = asyncio.get_event_loop()
+            self.server.device = "USB"                    # 让启动走慢解析（持锁）
+            start = asyncio.ensure_future(self.server.set_user_enabled(True))
+            await loop.run_in_executor(None, started.wait, 5)
+            pause = asyncio.ensure_future(self.server.set_user_enabled(False))   # 排在启动的锁后
+            await self._wait_for_lock_waiters(1)          # 确定暂停已排上（不靠墙钟）
+            release.set()                                 # 放行解析 → 启动失败、写错误、退回暂停
+            ok, err = await start
+            self.assertFalse(ok, "这次启动应当失败：%r" % (err,))
+            await pause
+            snap = self.server.snapshot()
+            self.assertEqual(snap["error"], "device busy",
+                             "★ F17-1：紧跟其后的「暂停」（no-op）不得擦掉刚写下的失败原因")
+            self.assertFalse(snap["userOn"])
+
+        self.with_server(body)
+
     def test_error_written_during_pause_join_is_not_erased(self):
         """暂停的 join 期间刚写下的错误，不得被这次"成功"擦掉（第十六轮 M-1）。
 

@@ -407,12 +407,15 @@ class HelperServer(object):
         session = None
         stale = None
         failure = None
+        # 快照要放在**加锁之前**（第十七轮审查 F17-1）：等锁期间并发动作可能刚写下新错误，
+        # 那时"本次操作"就不该把它当陈旧错误清掉（no-op 分支以前正是这么漏的）。
+        error_seq = self._error_seq
         async with self._get_lock():
             if enabled == self.user_on:
-                # no-op 成功：也把上一次失败的提示清掉（独立审查抓的陈旧展示）
-                self.last_error = None
+                # no-op 成功：也把上一次失败的提示清掉（独立审查抓的陈旧展示），
+                # 但只在"等锁期间没发生新错误"时清（F17-1）。
+                self._clear_error_if_unchanged(error_seq)
                 return True, None
-            error_seq = self._error_seq        # 快照：见函数尾部的清错误守卫（M-1）
             # 意图变化：让任何"在飞的重启"作废（第八轮审查 S1/S2 —— 重启间隙里点暂停/启动）
             self._capture_epoch += 1
             self.user_on = enabled
@@ -442,8 +445,7 @@ class HelperServer(object):
         # 锁早已释放 —— 期间并发派发的动作（例如设备解析失败、另一次启动失败）可能刚写下
         # **真实的新错误**，无条件清会把窗口唯一的原因显示擦掉（GUI 只看 snapshot()["error"]）。
         # 与 R13/R14-1 同一类：只有"本次等待期间没发生新错误"时才清。
-        if self._error_seq == error_seq:
-            self.last_error = None
+        self._clear_error_if_unchanged(error_seq)
         return True, None
 
     async def start_capture(self, source=None, device=None):
@@ -542,6 +544,20 @@ class HelperServer(object):
         session.start()
         self._broadcast(("json", self._state_msg()))
         return True, None
+
+    def _clear_error_if_unchanged(self, entry_seq):
+        """清 `last_error` 的**唯一**入口：只有"从 `entry_seq` 快照以来没发生过新错误"时才清。
+
+        为什么要有这个助手（第十六/十七轮审查的既存 minor M-1 / F17-1）：判定"这条错误是否
+        过时"要靠 `_error_seq` 比对，而需要清错误的地方有 4 处（暂停/启动的两个分支 + 音源/设备
+        切换的"非采集态成功"分支）。以前每处各写一遍比对，结果 M-1（join 之后的清）和 F17-1
+        （no-op 分支的清）各漏了一处 —— 这正是"逐点打补丁"的失效模式。收敛成一个入口后，
+        新增清错误的地方只要调它、并传进入函数时的代次，就不可能再漏。
+        """
+        if self._error_seq == entry_seq:
+            self.last_error = None
+            return True
+        return False
 
     def _set_error(self, message):
         """写 `last_error` 的**唯一**入口：所有"真的出错了"的写入都必须走这里。
@@ -662,8 +678,7 @@ class HelperServer(object):
             # 注（第十四轮审查）：本分支里 `error_seq` 快照与比对之间**没有 await**
             # （唯一 await 是 holding=True 才走的 `_restart()`，那条路径根本不清错误），
             # 所以这个守卫结构上不可达，纯纵深防御 —— 别以为它在承重。
-            if self._error_seq == error_seq:
-                self.last_error = None    # 切换成功且期间没出错：上一次失败的提示就过时了
+            self._clear_error_if_unchanged(error_seq)
             return True, None
         return await self._restart()
 
@@ -710,8 +725,7 @@ class HelperServer(object):
             # 坑（第十三轮审查实测的既存 minor）：本次等待期间若**刚好发生采集失败**（解析慢，
             # 失败回调挤进来了：开关已被退回暂停、致命 capture_failed 也广播出去了），那条错误
             # 一点都不过时 —— 清了窗口就不再显示原因。用错误代次区分"陈旧"与"刚发生"。
-            if self._error_seq == error_seq:
-                self.last_error = None
+            self._clear_error_if_unchanged(error_seq)
             return True, None
         ok, error = await self._restart()
         if not ok:
