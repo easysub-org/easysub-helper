@@ -26,7 +26,7 @@ LICENSE_ID = "AGPL-3.0-or-later"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8790
-#: 端口被占时向后尝试的范围。**前端探测范围与它对齐**（src/helper.ts 的 HELPER_PORT_SCAN）
+#: 端口被占时向后尝试的范围。**前端探测范围与它对齐**（主仓 src/helper-ports.ts 的 HELPER_PORT_SCAN）
 PORT_SCAN_RANGE = 20
 
 #: 识别引擎的契约：16 kHz 单声道。PCM 在线路上的格式固定为 f32le（见 protocol.py）。
