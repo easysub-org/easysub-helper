@@ -192,6 +192,8 @@ class HelperWindow(object):
         self._thread = None
         self._closing = False
         self._tray = None
+        #: 托盘菜单回调（跑在 pystray 线程）只往这里投函数，由主线程 _poll 取出来执行
+        self._tray_actions = queue.Queue()
         self._boot_error = None
         self._shown_code = None
         self._shown_ttl = None
@@ -350,8 +352,10 @@ class HelperWindow(object):
         self.title_label.grid(row=0, column=1, sticky="w")
         # macOS 上不能说"不需要装虚拟声卡"：14.2+ 免驱，更早的系统要 BlackHole
         # （用户可用性审查抓到：窗口副标题与打包事实相反，直接摧毁用户对文档的信任）
-        self._subtitle_key = "gui.subtitleMac" if sys.platform == "darwin" else "gui.subtitle"
-        self.subtitle_label = ttk.Label(header, text=t(self._subtitle_key), style="Sub.TLabel",
+        self.subtitle_label = ttk.Label(
+            header,
+            text=t("gui.subtitleMac") if sys.platform == "darwin" else t("gui.subtitle"),
+            style="Sub.TLabel",
                                         justify="left", wraplength=330)
         self.subtitle_label.grid(row=1, column=1, sticky="w", pady=(2, 0))
         # 语言切换：按钮上写"另一种语言"的名字，点一下就地重译并记住
@@ -445,21 +449,29 @@ class HelperWindow(object):
         self.devices_button = ttk.Button(self.pair_frame, text=t("gui.devicesManage"),
                                          command=self.manage_devices)
         self.devices_button.grid(row=2, column=1, sticky="e", pady=(8, 0))
+        if getattr(self.server, "fixed_token", None):
+            # 调试模式（--token 固定令牌）根本没有"配对设备"这回事：禁用而不是给个点了没反应的按钮
+            self.devices_label.configure(text=t("gui.pairDebug"))
+            self.devices_button.state(["disabled"])
 
         # 设置行（用户可用性审查：助手"关窗即停服务"，用户手滑关掉窗口浏览器那边就废了）
         self.settings = ttk.Frame(outer)
         self.settings.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-        self.tray_var = self.tk.BooleanVar(value=False)
+        # 默认**开**（用户要的就是"关窗别杀服务"），并记住用户的选择
+        tray_ok = tray.available()
+        self._tray_wanted = bool(config.get_setting("minimize_to_tray", True)) and tray_ok
+        self.tray_var = self.tk.BooleanVar(value=self._tray_wanted)
         self.tray_box = ttk.Checkbutton(
             self.settings, text=t("gui.minimizeToTray"), variable=self.tray_var,
             command=self._on_tray_toggle)
         self.tray_box.grid(row=0, column=0, sticky="w")
-        if not tray.available():
-            # 装不上就说清楚，而不是给一个点了没反应的勾选框
+        self.tray_hint = ttk.Label(self.settings, text="", style="Hint.TLabel",
+                                   wraplength=380, justify="left")
+        if not tray_ok:
+            # 装不上就说清楚（含安装命令），而不是给一个点了没反应的勾选框
             self.tray_box.state(["disabled"])
             self.tray_var.set(False)
-            self.tray_hint = ttk.Label(self.settings, text=t("gui.trayUnavailable"),
-                                       style="Hint.TLabel", wraplength=380, justify="left")
+            self.tray_hint.configure(text=tray.unavailable_reason())
             self.tray_hint.grid(row=1, column=0, sticky="w")
 
         footer = ttk.Frame(outer)
@@ -553,6 +565,7 @@ class HelperWindow(object):
             logging.getLogger("easysub-helper").debug(t("log.guiRefreshFailed", error=exc))
         self._refresh_log()
         self._drain_device_results()
+        self._drain_tray_actions()
         if self._device_reload_pending:
             self._device_reload_pending = False
             self._reload_devices()
@@ -570,16 +583,20 @@ class HelperWindow(object):
             self._set_status(t("gui.statusStarting"), COLOR_WARN)
             self.detail_label.configure(text="")
         elif snap["error"]:
-            self._set_status(t("gui.captureFailed"), COLOR_ERR)
+            # 采集中断时把"下一步"写在这里：用户在助手窗口看的就是这一行
+            self._set_status(self._status_with_port(
+                "{} —— {}".format(t("gui.captureFailed"), t("gui.captureFailedHint"))), COLOR_ERR)
             self.detail_label.configure(text=snap["error"])
         elif snap["paused"]:
-            self._set_status(t("gui.statusPaused", port=snap["port"]), COLOR_WARN)
+            self._set_status(self._status_with_port(
+                t("gui.statusPaused", port=snap["port"])), COLOR_WARN)
             self.detail_label.configure(text="")
         elif snap["capturing"]:
-            self._set_status(t("gui.captureOn", source=source_label(snap["source"])), COLOR_OK)
+            self._set_status(self._status_with_port(
+                t("gui.captureOn", source=source_label(snap["source"]))), COLOR_OK)
             self.detail_label.configure(text=self._backend_text(snap))
         else:
-            self._set_status(t("gui.waitingFrames"), COLOR_WARN)
+            self._set_status(self._status_with_port(t("gui.waitingFrames")), COLOR_WARN)
             self.detail_label.configure(text=self._backend_text(snap))
 
         self.clients_label.configure(text=t("gui.clients", count=snap["clients"]))
@@ -595,6 +612,7 @@ class HelperWindow(object):
             self.toggle_button.state(["disabled"])
 
         self._refresh_level(snap)
+        self._drain_tray_actions()
         self._refresh_pair_code()
 
     def _backend_text(self, snap):
@@ -612,6 +630,20 @@ class HelperWindow(object):
         except Exception as exc:  # noqa: BLE001 - 没浏览器/无桌面环境不该让窗口崩
             logging.getLogger("easysub-helper").warning(
                 t("log.openSourceFailed", error=exc))
+
+    def _status_with_port(self, text):
+        """状态行永远带上端口：页面离线框里那句"助手状态行里那个「端口 N」"要靠它。
+
+        坑（独立审查）：以前只有"已暂停"那一态显示端口，用户点了「启动」之后照着页面文案
+        去状态行找端口就找不到了。
+        """
+        port = getattr(self.server, "port", None)
+        if not port:
+            return text
+        suffix = t("gui.statusPort", port=port)
+        if suffix in text:          # 有的文案（gui.statusPaused）本来就带端口，别写两遍
+            return text
+        return "{}  ·  {}".format(text, suffix)
 
     def _set_status(self, text, color):
         self.status_label.configure(text=text)
@@ -739,17 +771,13 @@ class HelperWindow(object):
             self.new_button.state(["disabled"])
             self._shown_code = None
             return
+        # 过期自动换码这件事**本来就已经成立**：ensure_code() 在码过期时会自己 new_code()
+        # （pairing.py 的 ensure_code → new_code），所以窗口不会长期摆着一个死码。
+        # 更正（独立审查核对 `git show 69d5241`）：我先前以为这里是"显示死码"的死路并加了一个
+        # `new_code()` 分支 —— 那是**不可达的死代码**，已删除。这条路径真正缺的只是下面那句
+        # "被锁了怎么办"的提示（已补）。
         self.pairing.ensure_code()
         state = self.pairing.state()
-        if not state.get("valid"):
-            # 坑（用户可用性审查抓到的**死路**）：以前这里直接 return —— 窗口于是**永远**
-            # 显示上一次的码与"N 秒内有效"，而 server 侧早就作废了。用户照抄 → 报"码不正确/
-            # 已过期" → 再抄 → 五次之后被锁 300 秒，而窗口连"已锁定"都不显示。
-            # 现在：码失效就**自动换一个**（等价于替用户点「换一个」，顺带解除锁定）。
-            self.pairing.new_code()
-            state = self.pairing.state()
-            self._shown_code = None
-            self._shown_ttl = None
         locked = int(state.get("lockedForSec") or 0)
         if locked:
             hint = t("gui.pairLocked", sec=locked)
@@ -792,7 +820,8 @@ class HelperWindow(object):
         frame = self.ttk.Frame(win, padding=(12, 10, 12, 10))
         frame.grid(row=0, column=0, sticky="nsew")
         self.ttk.Label(frame, text=t("gui.devicesHint"), style="Hint.TLabel",
-                  wraplength=420, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
+                       wraplength=420, justify="left").grid(row=0, column=0, columnspan=2,
+                                                            sticky="w")
         box = self.tk.Listbox(frame, height=max(3, min(8, len(items) or 3)), width=50,
                               activestyle="none", font=self.font_mono_small, relief="flat",
                               highlightthickness=1, highlightbackground="#e5e7eb",
@@ -800,12 +829,18 @@ class HelperWindow(object):
         box.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 6))
         digests = []
         for entry in items:
-            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(entry.get("created", 0) or 0))
+            created = int(entry.get("created") or 0)
+            when = (time.strftime("%Y-%m-%d %H:%M", time.localtime(created))
+                    if created else t("gui.deviceWhenUnknown"))
             box.insert("end", "{}  ·  {}".format(entry.get("label") or "browser",
                                                  t("gui.deviceWhen", when=when)))
             digests.append(entry.get("digest"))
         if not items:
             box.insert("end", t("gui.devicesEmpty"))
+
+        #: 「全部解绑」的二次确认状态（闭包要用，必须先定义）
+        confirm_all = {"armed": False}
+        all_button = self.ttk.Button(frame, text=t("gui.deviceUnbindAll"), command=None)
 
         def report(count):
             if count:
@@ -816,6 +851,8 @@ class HelperWindow(object):
         def unbind_selected():
             selected = sorted(box.curselection(), reverse=True)
             if not selected:
+                log = logging.getLogger("easysub-helper")
+                log.info(t("gui.deviceSelectFirst"))     # 静默 return 看起来像按钮坏了
                 return
             removed = 0
             for index in selected:
@@ -831,6 +868,11 @@ class HelperWindow(object):
             report(removed)
 
         def unbind_all():
+            # 二次确认：这个按钮一按就废掉所有页面（独立审查：缺护栏）
+            if not confirm_all["armed"]:
+                confirm_all["armed"] = True
+                all_button.configure(text=t("gui.deviceUnbindAllConfirm"))
+                return
             removed = self.pairing.forget_all()
             box.delete(0, "end")
             del digests[:]
@@ -839,8 +881,8 @@ class HelperWindow(object):
 
         self.ttk.Button(frame, text=t("gui.deviceUnbind"), command=unbind_selected).grid(
             row=2, column=0, sticky="w")
-        self.ttk.Button(frame, text=t("gui.deviceUnbindAll"), command=unbind_all).grid(
-            row=2, column=1, sticky="e")
+        all_button.configure(command=unbind_all)     # 见上面 confirm_all 的说明
+        all_button.grid(row=2, column=1, sticky="e")
         self.ttk.Button(frame, text=t("gui.close"), command=win.destroy).grid(
             row=3, column=0, columnspan=2, sticky="e", pady=(8, 0))
         win.bind("<Escape>", lambda _e: win.destroy())
@@ -878,7 +920,8 @@ class HelperWindow(object):
         """把窗口里**每一个**控件文案重新取一遍（i18n 的机械保证：这里不许硬编码）。"""
         self.root.title(t("gui.title"))
         self.title_label.configure(text=t("gui.title"))
-        self.subtitle_label.configure(text=t(self._subtitle_key))
+        self.subtitle_label.configure(
+            text=t("gui.subtitleMac") if sys.platform == "darwin" else t("gui.subtitle"))
         self.lang_button.configure(text=language_label(other_language()))
         self.keep_open_label.configure(text=t("gui.keepOpen"))
         self.license_label.configure(text=t("gui.licenseSource"))
@@ -1037,36 +1080,73 @@ class HelperWindow(object):
         logging.getLogger("easysub-helper").info(t("log.newCode", code=format_code(code)))
         self._refresh_pair_code()
 
-    # ---------------- 登录自启 / 托盘 ----------------
+    # ---------------- 托盘（可选：装了 pystray 才有） ----------------
     def _on_tray_toggle(self):
         want = bool(self.tray_var.get())
+        config.set_setting("minimize_to_tray", want)     # 记住选择：别每次重启都回到默认
         if want and not self._tray:
             self._tray = tray.Tray(
                 icon_path=os.path.join(assets_dir(), "icon128.png"),
-                on_show=lambda: self._tray_action(self.show_window),
-                on_toggle=lambda: self._tray_action(self.toggle_capture),
-                on_quit=lambda: self._tray_action(self.quit),
+                on_show=self.show_window,
+                on_toggle=self.toggle_capture,
+                on_quit=self.quit,
                 is_capturing=lambda: bool(self.server and self.server.user_on),
+                actions=self._tray_actions,
             )
             if not self._tray.start():
                 self._tray = None
                 self.tray_var.set(False)
-                logging.getLogger("easysub-helper").warning(t("gui.trayUnavailable"))
+                self._show_tray_hint(tray.unavailable_reason())
                 return
+            # 坑（独立审查 B1）：start() 返回 True **不代表图标真的起来了**（run() 里的
+            # 异常没人接）。所以要等就绪回调；没就绪就把勾去掉并说明，绝不能"勾上了但没图标"
+            # —— 那样 on_close 会把窗口收走，用户找不回窗口也退不出。
+            self.root.after(1500, self._verify_tray)
         elif not want and self._tray:
             self._tray.stop()
             self._tray = None
 
-    def _tray_action(self, func):
-        """托盘回调跑在 pystray 线程里：**必须**切回 tkinter 主线程再动控件。"""
-        try:
-            self.root.after(0, func)
-        except Exception:                            # noqa: BLE001 - 窗口正在销毁
-            pass
+    def _verify_tray(self):
+        """托盘真的就绪了吗？没就绪就退回去（宁可没有托盘，也不能有隐形进程）。"""
+        if self._tray is None:
+            return
+        if self._tray.ready():
+            logging.getLogger("easysub-helper").info(t("log.trayReady"))
+            return
+        reason = self._tray.failed() or "not ready"
+        self._tray.stop()
+        self._tray = None
+        self.tray_var.set(False)
+        config.set_setting("minimize_to_tray", False)
+        self._show_tray_hint(tray.unavailable_reason())
+        logging.getLogger("easysub-helper").warning(t("log.trayFailed", error=reason))
+
+    def _show_tray_hint(self, text):
+        if getattr(self, "tray_hint", None) is not None:
+            self.tray_hint.configure(text=text)
+            self.tray_hint.grid()
+        else:
+            logging.getLogger("easysub-helper").warning(text)
+
+    def _drain_tray_actions(self):
+        """托盘菜单回调排在这里执行（pystray 线程绝不碰 tkinter）。"""
+        while True:
+            try:
+                func = self._tray_actions.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                func()
+            except Exception as exc:                 # noqa: BLE001
+                logging.getLogger("easysub-helper").warning("tray action failed: %s", exc)
 
     def on_close(self):
-        """点窗口的 × —— 勾了「最小化到托盘」就只收窗口，服务与采集继续。"""
-        if self._tray is not None and bool(self.tray_var.get()):
+        """点窗口的 × —— 勾了「最小化到托盘」**且托盘确实就绪**时，只收窗口、服务继续。
+
+        坑（独立审查 B1）：如果托盘没就绪就把窗口收走，用户会得到一个"没有窗口、没有图标、
+        服务还在跑"的隐形进程 —— 既叫不回窗口也退不出。所以这里必须同时要求 `ready()`。
+        """
+        if self._tray is not None and self._tray.ready() and bool(self.tray_var.get()):
             self.root.withdraw()
             logging.getLogger("easysub-helper").info(t("log.minimizedToTray"))
             return
@@ -1111,6 +1191,11 @@ class HelperWindow(object):
         except Exception:  # noqa: BLE001
             pass
 
+    def _start_tray_if_wanted(self):
+        """按用户上次的选择把托盘拉起来（勾过一次就该自动生效）。"""
+        if getattr(self, "_tray_wanted", False) and self._tray is None:
+            self._on_tray_toggle()
+
     def mainloop(self):
         self.root.mainloop()
         thread = self._thread
@@ -1124,6 +1209,7 @@ def run(server, pairing):
     if tkinter_module() is None:
         return None
     window = HelperWindow(server, pairing)
+    window._start_tray_if_wanted()      # 上次勾过"关窗最小化到托盘"就自动拉起
     return window.mainloop()
 
 

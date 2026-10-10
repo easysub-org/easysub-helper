@@ -152,29 +152,148 @@ def resolve_language(argv=None):
 
 
 # ---------------- 服务 ----------------
+def _port_warning_needed(port):
+    """用了 `--port` 就该提醒吗？
+
+    坑（独立审查 M1）：助手的顺延是**相对 `--port`** 的（server 里 `self.port + i`），
+    而字幕页面只在**绝对** 8790–8810 探测。所以 `--port 8800` 看着"在范围内"，被占后却会漂到
+    8801–8820 —— 页面照样找不到。判据必须是"基础端口不是默认值"，而不是"端口本身越界"。
+    `--port 0`（随机端口）也提醒：页面同样不可能自动找到它。
+    """
+    first = config.DEFAULT_PORT
+    last = config.DEFAULT_PORT + config.PORT_SCAN_RANGE
+    if port == 0:
+        return True
+    return port < first or port + config.PORT_SCAN_RANGE > last or port != first
+
+
+def _pid_alive(pid):
+    """进程还在吗（跨平台，只用标准库）。"""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            SYNCHRONIZE = 0x00100000
+            handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+            if not handle:
+                return False
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        except Exception:                            # noqa: BLE001
+            return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    except Exception:                                # noqa: BLE001
+        return False
+    return True
+
+
+def _lock_path():
+    return os.path.join(str(config.data_dir()), "helper.lock")
+
+
+def _read_lock():
+    """锁文件里那个实例（返回端口；文件不存在/进程已死都返回 None）。"""
+    import json as _json
+
+    try:
+        with open(_lock_path(), "r", encoding="utf-8") as handle:
+            data = _json.load(handle)
+    except Exception:                                # noqa: BLE001 - 没有文件/坏文件都算没有
+        return None
+    if not isinstance(data, dict):
+        return None
+    pid = int(data.get("pid") or 0)
+    if pid == os.getpid():
+        return None
+    if not _pid_alive(pid):
+        _clear_lock()                                # 上次没退干净留下的僵尸锁：清掉
+        return None
+    port = data.get("port")
+    return int(port) if isinstance(port, int) and port > 0 else -1
+
+
+def _write_lock(port):
+    import json as _json
+
+    try:
+        path = _lock_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            _json.dump({"pid": os.getpid(), "port": port}, handle)
+    except Exception:                                # noqa: BLE001 - 写不了锁不该拦住启动
+        pass
+
+
+def _clear_lock():
+    try:
+        os.remove(_lock_path())
+    except OSError:
+        pass
+
+
 def _find_running_helper(preferred_port=None):
     """看看本机是不是已经有助手在跑（返回它的端口，没有就 None）。
 
     为什么要拦（用户可用性审查抓到的真实坑）：两个实例**各有各的配对码**（各自内存里的），
     却写**同一份** `pairing.json`，于是互相覆盖对方发出的设备令牌 —— 用户的表现是
     "刚配对好、过一会儿又要重新配对"，而且照另一个窗口里的码输入还会连错五次被锁 300 秒。
+
+    两道探测：
+      ① 锁文件（`data_dir/helper.lock`）：精确、不受 `http_proxy` 影响、也不管它监听哪个端口
+         —— HTTP 探测只覆盖 8790–8810 + 指定端口，`--port 9000` 或 `--host <网卡>` 的实例
+         以前根本探不到（独立审查 M2）；
+      ② `/api/pair/info` 兜底（锁文件被删/旧版本没有锁文件时仍能发现）。
     """
     import json as _json
     import urllib.request as _url
+
+    port = _read_lock()
+    if port:
+        return port
 
     ports = []
     if preferred_port:
         ports.append(preferred_port)
     ports.extend(range(config.DEFAULT_PORT, config.DEFAULT_PORT + config.PORT_SCAN_RANGE + 1))
-    for port in ports:
+    # 走代理会让"本机探测"整个失效（环境里有 http_proxy 时 urlopen 会把 127.0.0.1 也代理出去）
+    opener = _url.build_opener(_url.ProxyHandler({}))
+    for candidate in ports:
         try:
-            with _url.urlopen("http://127.0.0.1:{}/api/pair/info".format(port), timeout=0.2) as resp:
+            with opener.open("http://127.0.0.1:{}/api/pair/info".format(candidate),
+                             timeout=0.2) as resp:
                 payload = _json.loads(resp.read().decode("utf-8", "replace"))
         except Exception:          # noqa: BLE001 - 连不上/不是助手：都算"没有"
             continue
         if isinstance(payload, dict) and payload.get("app") == "easysub-helper":
-            return port
+            return candidate
     return None
+
+
+def _ask_keep_second_instance(port):
+    """无控制台产物里 `_eprint` 是黑洞（窗口化打包下 stderr 被换成 devnull）——
+    双击第二个图标会"什么都不发生"（独立审查 B2）。所以有 GUI 时**弹窗问**。
+    """
+    try:
+        import tkinter
+        import tkinter.messagebox as messagebox
+
+        root = tkinter.Tk()
+        root.withdraw()
+        try:
+            answer = messagebox.askyesno(t("app.title"), t("cli.dlg.multiInstance", port=port))
+        finally:
+            try:
+                root.destroy()
+            except Exception:                        # noqa: BLE001
+                pass
+        return bool(answer)
+    except Exception:                                # noqa: BLE001 - 没 GUI 就回落命令行提示
+        return None
 
 
 def build_server(args, user_on=False):
@@ -214,6 +333,7 @@ async def _rotate_pair_code(pairing):
 
 async def _serve(server, pairing):
     await server.start()
+    _write_lock(server.port)                         # 单实例护栏的"我在跑"标记
     state = pairing.state() if pairing is not None else {"valid": False}
     _eprint("")
     _eprint("{} v{}".format(t("app.title"), __version__))
@@ -321,16 +441,32 @@ def main(argv=None):
     # —— 启动护栏（用户可用性审查：这几个开关都能让"页面永远找不到助手"，而页面只会说
     #    "助手没在运行"）——
     first, last = config.DEFAULT_PORT, config.DEFAULT_PORT + config.PORT_SCAN_RANGE
-    if args.port not in (0,) and not (first <= args.port <= last):
+    if _port_warning_needed(args.port):
         _eprint(t("cli.warn.portOutOfRange", port=args.port, first=first, last=last))
     if not security.is_loopback_host(args.host) and args.host not in ("0.0.0.0", "::"):
         _eprint(t("cli.warn.hostSpecific", host=args.host))
     running = _find_running_helper(args.port)
     if running:
-        if not args.allow_multi:
-            _eprint(t("cli.err.multiInstance", port=running))
-            return 2
-        _eprint(t("cli.warn.multiInstance", port=running))
+        if args.allow_multi:
+            _eprint(t("cli.warn.multiInstance", port=running))
+        else:
+            # 窗口化打包（Windows --noconsole / macOS --windowed）下 stderr 是黑洞：
+            # 只 _eprint 会让用户以为"双击没反应"（独立审查 B2）。有 GUI 就弹窗让用户选。
+            answer = None
+            try:
+                from . import gui as _gui
+
+                if _gui.available():
+                    answer = _ask_keep_second_instance(running)
+            except Exception:                        # noqa: BLE001
+                answer = None
+            if not answer:
+                _eprint(t("cli.err.multiInstance", port=running))
+                logging.getLogger("easysub-helper").warning(
+                    t("cli.err.multiInstance", port=running))
+                return 2
+            logging.getLogger("easysub-helper").warning(
+                t("cli.warn.multiInstance", port=running))
 
     from . import gui
 
@@ -338,6 +474,7 @@ def main(argv=None):
     server, pairing = build_server(args, user_on=not use_gui)
 
     def cleanup():
+        _clear_lock()
         return server.stop()
 
     if use_gui:

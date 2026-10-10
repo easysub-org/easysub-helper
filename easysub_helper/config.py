@@ -75,6 +75,19 @@ def load_settings() -> dict:
     return values if isinstance(values, dict) else {}
 
 
+def get_setting(key, default=None):
+    """读一个偏好项（读不到就是 default）。"""
+    value = load_settings().get(key)
+    return default if value is None else value
+
+
+def set_setting(key, value) -> bool:
+    """写一个偏好项（保留其它项）。"""
+    values = load_settings()
+    values[key] = value
+    return save_settings(values)
+
+
 def save_settings(values) -> bool:
     """原子写（临时文件 + os.replace），失败返回 False。
 

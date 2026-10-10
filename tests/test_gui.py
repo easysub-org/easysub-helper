@@ -381,16 +381,20 @@ class WindowTest(WindowCase):
     def test_status_line_maps_paused_and_capturing(self):
         self._stub_snapshot(running=True, paused=True, userOn=False, capturing=False, port=8799)
         self.window._refresh()
-        self.assertEqual(self.window.status_label.cget("text"),
-                         i18n.t("gui.statusPaused", port=8799))
+        paused_text = self.window.status_label.cget("text")
+        self.assertEqual(paused_text, i18n.t("gui.statusPaused", port=8799))
+        # 端口只能出现一次（statusPaused 自带端口，别再被 _status_with_port 追加一遍）
+        self.assertEqual(paused_text.count(i18n.t("gui.statusPort", port=8799)), 1)
         self.assertEqual(self.window.toggle_button.cget("text"), i18n.t("gui.start"))
 
         # 注意：一定不能写成 lambda 里再调 self.server.snapshot()（那就是调用自己）
         self._stub_snapshot(running=True, paused=False, userOn=True, capturing=True,
                             source="system", backend="parec")
         self.window._refresh()
+        # 采集态也带端口：页面离线框让用户"去助手状态行抄端口"，任何状态都得有
         self.assertEqual(self.window.status_label.cget("text"),
-                         i18n.t("gui.captureOn", source=i18n.source_label("system")))
+                         i18n.t("gui.captureOn", source=i18n.source_label("system"))
+                         + "  ·  " + i18n.t("gui.statusPort", port=8799))
         self.assertEqual(self.window.toggle_button.cget("text"), i18n.t("gui.pause"))
         self.assertIn(i18n.t("gui.backend", backend="parec", rate=16000),
                       self.window.detail_label.cget("text"))
@@ -398,7 +402,11 @@ class WindowTest(WindowCase):
     def test_error_is_shown_instead_of_capture_state(self):
         self._stub_snapshot(running=True, paused=True, capturing=False, error="no device")
         self.window._refresh()
-        self.assertEqual(self.window.status_label.cget("text"), i18n.t("gui.captureFailed"))
+        # 采集中断时状态行还要带"下一步"（点「启动」重试）与端口（页面会指引用户来抄）
+        shown = self.window.status_label.cget("text")
+        self.assertTrue(shown.startswith(i18n.t("gui.captureFailed")), shown)
+        self.assertIn(i18n.t("gui.captureFailedHint"), shown)
+        self.assertIn(i18n.t("gui.statusPort", port=8799), shown)
         self.assertEqual(self.window.detail_label.cget("text"), "no device")
 
     def test_toggle_button_disabled_until_the_service_runs(self):
@@ -522,6 +530,34 @@ class WindowTest(WindowCase):
         self.assertTrue(mgr.forget_all())          # 全部解绑走的是 pairing 的入口
         self.assertEqual(mgr.list_devices(), [])
 
+    def test_close_does_not_hide_when_tray_is_not_ready(self):
+        """坑（独立审查 B1）：托盘没就绪就把窗口收走 = 没有窗口、没有图标、服务还在跑的
+        隐形进程 —— 用户既叫不回窗口也退不出。所以没就绪时必须**照旧退出**。"""
+
+        class NotReadyTray(object):
+            def ready(self):
+                return False
+
+            def stop(self):
+                pass
+
+        self.window._tray = NotReadyTray()
+        self.window.tray_var.set(True)
+        self.window.on_close()
+        # 走的是真退出（quit → root.destroy），所以退出后再查窗口状态会抛 TclError
+        self.assertTrue(self.window._closing, "托盘没就绪时绝不能把窗口藏起来")
+
+    def test_tray_is_disabled_on_macos(self):
+        """macOS 上 pystray 要求 run() 在主线程，而主线程被 tkinter 占着 → 宁可没有托盘，
+        也不能给一个"勾上了、图标没出现、窗口却被收走"的隐形进程（独立审查 B1）。"""
+        from unittest import mock
+
+        from easysub_helper import tray as tray_mod
+
+        with mock.patch.object(tray_mod.sys, "platform", "darwin"):
+            self.assertFalse(tray_mod.available())
+            self.assertIn("macOS", tray_mod.unavailable_reason())
+
     def test_tray_control_exists(self):
         """设置行要有「关窗最小化到托盘」勾选框；装不上 pystray 时禁用并说明原因。"""
         from easysub_helper.i18n import t
@@ -546,6 +582,12 @@ class WindowTest(WindowCase):
     def test_close_with_tray_only_hides_the_window(self):
         """开了托盘时，关窗只收窗口：服务与采集继续（用户可用性审查的诉求）。"""
         class FakeTray(object):
+            def __init__(self, ready=True):
+                self._ready = ready
+
+            def ready(self):
+                return self._ready
+
             def stop(self):
                 pass
 

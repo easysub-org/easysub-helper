@@ -99,6 +99,9 @@ class PairingManager(object):
     def __init__(self, store_path=None, code_ttl=CODE_TTL, max_attempts=MAX_ATTEMPTS,
                  attempt_window=ATTEMPT_WINDOW, lockout=LOCKOUT, persist=True):
         self._lock = threading.Lock()
+        #: 落盘单独一把锁：`_save` 是"读全表→写 tmp→replace"，两个线程同时进来会互踩
+        #: （`_save` 只吞 IOError/OSError，RuntimeError 会冒进 Tk 回调）。独立审查 m3。
+        self._save_lock = threading.Lock()
         self._code = None
         self._code_expires = 0.0
         self._attempts = []
@@ -251,28 +254,32 @@ class PairingManager(object):
                 }
 
     def _save(self):
-        data = {
-            "version": STORE_VERSION,
-            "tokens": [
-                {"hash": h, "label": v.get("label"), "created": v.get("created")}
-                for h, v in self._tokens.items()
-            ],
-        }
-        tmp = self._store + ".tmp"
-        try:
-            directory = os.path.dirname(self._store)
-            if directory and not os.path.isdir(directory):
-                os.makedirs(directory)
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(data, fh, ensure_ascii=False, indent=2)
-            os.replace(tmp, self._store)
-        except (IOError, OSError):
-            # 落盘失败不影响本次运行（下次启动只是需要重新配对，不该让服务起不来）
+        with self._save_lock:                       # 见 __init__: _save_lock 的说明
+            return self._save_unlocked()
+
+    def _save_unlocked(self):
+            data = {
+                "version": STORE_VERSION,
+                "tokens": [
+                    {"hash": h, "label": v.get("label"), "created": v.get("created")}
+                    for h, v in self._tokens.items()
+                ],
+            }
+            tmp = self._store + ".tmp"
             try:
-                if os.path.isfile(tmp):
-                    os.remove(tmp)
-            except OSError:
-                pass
+                directory = os.path.dirname(self._store)
+                if directory and not os.path.isdir(directory):
+                    os.makedirs(directory)
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(data, fh, ensure_ascii=False, indent=2)
+                os.replace(tmp, self._store)
+            except (IOError, OSError):
+                # 落盘失败不影响本次运行（下次启动只是需要重新配对，不该让服务起不来）
+                try:
+                    if os.path.isfile(tmp):
+                        os.remove(tmp)
+                except OSError:
+                    pass
 
     def reset(self):
         """清空码、锁定状态与令牌（测试用）。"""

@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 hcz1017
+"""单实例护栏与端口提醒的测试。
+
+为什么要这两条护栏（可用性审查抓到的真实危害）：两个助手实例**各有各的配对码**，却写同一份
+`pairing.json`，于是互相覆盖对方发出的设备令牌 —— 用户的表现是"刚配对好、过一会儿又要重新
+配对"。而 `--port` 一旦不是默认值，助手顺延后可能落到字幕页面**探测不到**的端口。
+"""
+
+import json
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+from easysub_helper import cli, config
+
+
+class PortWarningTest(unittest.TestCase):
+    def test_default_port_needs_no_warning(self):
+        self.assertFalse(cli._port_warning_needed(config.DEFAULT_PORT))
+
+    def test_any_non_default_base_port_warms(self):
+        # 关键：8800 本身"在范围内"，但助手是从它往后顺延的 → 可能漂出 8810
+        self.assertTrue(cli._port_warning_needed(8800))
+        self.assertTrue(cli._port_warning_needed(8791))
+        self.assertTrue(cli._port_warning_needed(9000))
+        self.assertTrue(cli._port_warning_needed(1024))
+
+    def test_random_port_warns(self):
+        # --port 0 是受支持的开发用法，但页面永远探不到它
+        self.assertTrue(cli._port_warning_needed(0))
+
+
+class LockTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self._patches = [mock.patch.object(config, "data_dir", lambda: self.tmp)]
+        for item in self._patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def test_write_then_read_lock(self):
+        cli._write_lock(8790)
+        path = os.path.join(self.tmp, "helper.lock")
+        self.assertTrue(os.path.exists(path))
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        self.assertEqual(data["port"], 8790)
+        self.assertEqual(data["pid"], os.getpid())
+        # 自己的锁不算"另一个实例"
+        self.assertIsNone(cli._read_lock())
+
+    def test_stale_lock_is_cleaned_up(self):
+        cli._write_lock(8790)
+        path = os.path.join(self.tmp, "helper.lock")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"pid": 999999999, "port": 8790}, handle)   # 几乎不可能存在的 pid
+        self.assertIsNone(cli._read_lock())
+        self.assertFalse(os.path.exists(path), "僵尸锁要顺手清掉，别让下次启动误判")
+
+    def test_live_other_instance_is_detected(self):
+        cli._write_lock(8790)
+        path = os.path.join(self.tmp, "helper.lock")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"pid": os.getpid() + 1, "port": 9000}, handle)
+        with mock.patch.object(cli, "_pid_alive", return_value=True):
+            self.assertEqual(cli._read_lock(), 9000)
+            # 锁文件优先：它不受 http_proxy 影响，也不管实例监听哪个端口/网卡
+            self.assertEqual(cli._find_running_helper(), 9000)
+
+    def test_clear_lock(self):
+        cli._write_lock(8790)
+        cli._clear_lock()
+        self.assertIsNone(cli._read_lock())
+
+    def test_pid_alive(self):
+        self.assertTrue(cli._pid_alive(os.getpid()))
+        self.assertFalse(cli._pid_alive(0))
+        self.assertFalse(cli._pid_alive(999999999))
+
+
+if __name__ == "__main__":
+    unittest.main()
