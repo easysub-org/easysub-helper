@@ -10,10 +10,9 @@
   1. **设备令牌**：由配对码换取，只存 sha256 并落盘；`/ws` 只认它（用 `hmac.compare_digest`
      做常数时间比较）。令牌有效就等价于"这个页面被用户亲手放行过"——所以握手不再看 Origin，
      扩展的 offscreen 文档不带 Origin 也不会被误伤。
-  2. **Origin 白名单**（只用于 `/api/pair`，那一步还没有令牌）：接受**任意端口**的本机页面
-     （`http://127.0.0.1:*` / `http://localhost:*` / `http://[::1]:*` —— Web 版可能跑在任意开发端口）、
-     **扩展来源**（`chrome-extension://` / `moz-extension://` / `safari-web-extension://`），
-     以及 `--allow-origin` 显式放行的非回环来源。
+  2. **CORS 默认全放行**（产品要求）：`/api/pair` 对**任意** Origin 都回 CORS 头，用户不需要
+     做任何设置就能在任意域名/端口的 Web 版或扩展里用。想收紧的人显式 `--restrict-origin`
+     （`restrict=True`），那时才退回"本机页面 + 扩展 + 显式列出的来源"白名单。
 
      扩展来源为什么默认放行：主项目的扩展形态（面板 + offscreen）本来就是一等公民用户，
      要求用户为每个扩展 ID 手加 `--allow-origin` 等于把功能藏起来。放行它的实际风险有限——
@@ -128,23 +127,34 @@ def allowed_origins(port: int, extra=None):
     return tuple(items)
 
 
-def origin_ok(origin, port: int, extra=None, allow_extensions=True) -> bool:
-    """校验 Origin（只用于 `/api/pair`：那一步还没有令牌，白名单是唯一防线）。
+def origin_ok(origin, port: int, extra=None, allow_extensions=True, restrict=False) -> bool:
+    """校验 Origin（只用于 `/api/pair`：那一步还没有令牌）。
 
-    放行三类：本机任意端口的页面（`is_loopback_origin`）、浏览器扩展协议、
-    以及 `--allow-origin` 显式列出的来源。缺失 Origin 默认拒绝，需要时走
-    allow_no_origin（见 origin_ok_or_missing）。
+    **默认全放行** —— 这是产品要求（用户明确、且反复强调过）：CORS 不做手动设置，
+    部署在任何域名的 Web 版、任何预览站、任何扩展都要开箱能用，不许用户去找
+    `--allow-origin` / `--allow-cors-all` 这类开关。安全边界不靠 Origin：
+      * 服务只监听回环（`--host` 非回环必须显式 `--allow-lan`）；
+      * 拿音频要**配对码换来的设备令牌**（配对码只在用户自己开的助手窗口里显示）；
+      * 配对失败有限速（5 次/60s → 全局锁 300s）。
+    所以"放行 Origin"最多让外部网页能**发起**配对尝试、并触发上述限速，拿不到音频。
+
+    想收紧的人显式传 `restrict=True`（CLI：`--restrict-origin`），此时退回白名单语义：
+    本机任意端口的页面（`is_loopback_origin`）、浏览器扩展协议、以及 `extra` 里列出的来源
+    （`"*"` 表示回到全放行）。缺失 Origin 默认拒绝，需要时走 allow_no_origin
+    （见 origin_ok_or_missing）。
     """
     if not origin:
         return False
     origin = origin.strip().rstrip("/")
+    if not restrict:
+        return True                     # 默认：任意 Origin（含部署在域名的 Web 版）
     if allow_extensions and is_extension_origin(origin):
         return True
     if is_loopback_origin(origin):
         return True
     extra = tuple(extra or ())
     if "*" in extra:
-        return True                     # 显式放开：任意 Origin（含部署在域名的 Web 版）
+        return True
     for allowed in allowed_origins(port, extra):
         if safe_compare(origin, allowed):
             return True
@@ -152,7 +162,7 @@ def origin_ok(origin, port: int, extra=None, allow_extensions=True) -> bool:
 
 
 def origin_ok_or_missing(origin, port: int, extra=None, allow_no_origin=False,
-                         allow_extensions=True) -> bool:
+                         allow_extensions=True, restrict=False) -> bool:
     if not origin:
         return bool(allow_no_origin)
-    return origin_ok(origin, port, extra, allow_extensions=allow_extensions)
+    return origin_ok(origin, port, extra, allow_extensions=allow_extensions, restrict=restrict)

@@ -166,8 +166,9 @@ def build_server(args, user_on=False):
         default_source=args.source,
         backend=args.backend,
         device=args.device,
-        allow_origins=args.allow_origin,
+        allow_origins=list(args.restrict_origin) + list(args.allow_origin),
         allow_cors_all=args.allow_cors_all,
+        restrict_origin=bool(args.restrict_origin),
         version=__version__,
         fixed_token=fixed_token,
         user_on=user_on,
@@ -250,6 +251,12 @@ def build_parser():
                         help=t("cli.help.backend"))
     parser.add_argument("--device", help=t("cli.help.device"))
     parser.add_argument("--token", help=t("cli.help.token"))
+    #: 收紧用（可选）：只放行列出的来源 + 本机页面 + 浏览器扩展。
+    #: **默认是全放行**，正常使用不需要这个开关（产品要求：CORS 不做手动设置）。
+    parser.add_argument("--restrict-origin", action="append", default=[],
+                        metavar="ORIGIN", help=t("cli.help.restrictorigin"))
+    # 下面两个是历史参数，保留只为不弄坏旧脚本/旧文档里的命令；现在**已不需要**
+    # （默认就是全放行；--allow-origin 也成了 restrict 模式下的补充白名单）。
     parser.add_argument("--allow-origin", action="append", default=[],
                         help=t("cli.help.alloworigin"))
     parser.add_argument("--allow-cors-all", action="store_true",

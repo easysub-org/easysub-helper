@@ -98,9 +98,10 @@ Linux 上装 tkinter：`sudo apt install python3-tk`（Debian/Ubuntu）、
 --source system|mic     默认音源（系统音频 / 麦克风）
 --backend …             auto / soundcard / parec / pw-record / mac-system
 --device <子串>         指定设备（如 "Monitor of ..."）
---allow-origin <Origin> 额外放行的 Origin（Web 版部署在别的域名时用），可重复
---allow-cors-all        CORS 全放行：任意 Origin 都回 CORS 头（Web 版部署在域名/https
-                        预览站时用它最省事，等价于 --allow-origin '*'）
+--restrict-origin <Origin>  【可选·收紧】只放行列出的 Origin（外加本机页面与浏览器扩展），可重复。
+                        **默认本来就是 CORS 全放行，正常使用不需要这个开关**
+--allow-origin <Origin> （历史参数，已不需要）收紧模式下的额外白名单，可重复
+--allow-cors-all        （历史参数，已不需要）CORS 全放行 —— 现在就是默认行为
 --selftest              自检冻结产物（tkinter / 资源 / 重采样 / 本机 HTTP+WS 环路），全过退出 0
 --require-tkinter       配合 --selftest：无头环境缺 tkinter 也算失败（打包冒烟用，见 ci.yml）
 --token <固定令牌>      跳过配对（仅调试/测试）
@@ -127,25 +128,24 @@ Linux 上装 tkinter：`sudo apt install python3-tk`（Debian/Ubuntu）、
 - **`/ws` 只认令牌**（用 `hmac.compare_digest` 常数时间比较）。刻意**不再校验 Origin**：
   令牌是配对的产物，比 Origin 更能说明"这个页面被用户亲手放行过"；而且扩展的 offscreen 文档
   不一定带 Origin，硬拦会误伤正常用户。
-- `POST /api/pair` 仍校验 **Origin 白名单**（那一步还没有令牌，白名单是唯一防线）：
-  放行**任意端口**的本机页面（`http://127.0.0.1:*` / `http://localhost:*` / `http://[::1]:*`）、
-  扩展协议（`chrome-extension://` / `moz-extension://` / `safari-web-extension://`）。
-  端口刻意不校验 —— Web 版可能跑在任意开发端口（vite 5173、serve-web 3000…），
-  而真正的凭据是配对码；"必须与助手同端口"会把正常用户挡在门外（实测现象：dist-web 起来后
-   页面里根本看不到这个音源）。非回环来源（部署在别的域名）默认拒绝，需显式放行：**CORS 全放行**
-开关 `--allow-cors-all`（等价于 `--allow-origin '*'`）最省事 —— 助手只监听 127.0.0.1，
-令牌仍要靠配对码换取，放行的是 Origin 白名单、**不是鉴权**；外部网页的上限是用错码触发限速。
+- `POST /api/pair` 的 **CORS 默认全放行**（产品要求）：对**任意** Origin 都回 CORS 头，
+  用户不需要做任何设置 —— 部署在任何域名/预览站的 Web 版、任何端口、任何扩展都开箱能用。
+  安全边界不靠 Origin，而是三件套：**只监听回环**（`--host` 非回环必须显式 `--allow-lan`）、
+  **拿音频必须有配对码换来的设备令牌**（配对码只显示在用户自己打开的助手窗口里）、
+  **配对失败有限速**（5 次/60s → 全局锁 300s）。所以外部网页的上限是用错码触发限速。
+  想收紧的人显式 `--restrict-origin <Origin>`（可重复）：那时才退回白名单语义
+  （本机任意端口页面 + 扩展协议 + 列出的来源），未放行的来源连正确码也拿不到令牌。
 - **默认只绑回环地址**，`--host` 传非回环必须显式 `--allow-lan`。
 
 ---
 
 - **锁定是全局的**：60 秒内失败 5 次 → 锁 300 秒（期间连正确码也拒）。这是有意的（本机只有一个用户），但也意味着本机任意页面、或开了 `--allow-lan` 之后的局域网机器都能
   "用错码把配对锁住"进行骚扰 —— 用户在助手窗口点「换一个」即可解锁。所以**别在不可信网络里开 `--allow-lan`**。
-- `/api/pair` 的 **Origin 白名单是硬闸门**（有 Origin 但不允许 → 403），不只是 CORS 响应头；
-  没有 Origin 的请求（curl/脚本等非浏览器客户端）默认也拒绝。
-- 放行来源的两种办法：`--allow-origin <Origin>`（逐个列，可重复）或 `--allow-cors-all`
-  （任意 Origin）。**缺 Origin 的请求两者都放不开** —— 那条路径只由构造参数
-  `HelperServer(allow_no_origin=True)` 控制（没有对应 CLI 开关，只给测试/嵌入式用法）。
+- `/api/pair` 默认对任意 Origin 放行（**CORS 全放行，产品要求**）；只有显式
+  `--restrict-origin` 收紧后，未列出的来源才会被 403 挡掉。
+- **缺 Origin 的请求默认拒绝**（浏览器一定带 Origin；放开它等于给 curl/脚本这类非浏览器
+  客户端开口子）。那一条路径只由构造参数 `HelperServer(allow_no_origin=True)` 控制
+  （没有对应 CLI 开关，只给测试/嵌入式用法）。
 
 ## 协议速查
 
@@ -279,7 +279,7 @@ python tools/make_icons.py --source /path/to/easysub
 | Linux 上没有系统音频 | 确认 PulseAudio/PipeWire 在跑；`--device "Monitor of ..."` 可手选设备 |
 | macOS 上没有系统音频 | 14.2+ 装 `pysysaudio`（免驱动）；否则装 BlackHole 再 `--device` 指定 |
 | 端口被占 | 默认自动向后顺延 20 个（窗口与页面都会用实际端口）；`--port` 可指定 |
-| Web 版（非扩展）连不上 | 本机任意端口的页面默认放行；**部署在别的域名（含 https 预览站）时**，助手要加 `--allow-cors-all`（或 `--allow-origin https://你的域名`）才会回 CORS 头，否则浏览器把响应整个拦掉（控制台见 CORS 报错）。另注意：① https 页面连 `http://127.0.0.1` 在部分浏览器可能再被当 mixed content 拦（Chrome 对 localhost 网段有豁免，Firefox/Safari 未必）；② 助手没启动/被 CORS 拦时，**页面会明确拦住"开始"并提示先启动助手**（探测不到就不启动；探测到但没配对会弹配对框）——看到这个提示的话按提示做即可。③ "正在监听"四个字只出现在窗口**底部日志**区，状态行显示的是"已暂停 · 端口 N"或"正在采集…"，别照着状态行找 |
+| Web 版（非扩展）连不上 | **CORS 默认全放行**（任何域名/端口的页面都能连，不需要任何设置）；只有你自己用 `--restrict-origin` 收紧过、又没把该页面列进去时才会被浏览器拦掉（控制台见 CORS 报错）——那种情况把域名加进去或去掉该开关即可。另注意：① https 页面连 `http://127.0.0.1` 在部分浏览器可能再被当 mixed content 拦（Chrome 对 localhost 网段有豁免，Firefox/Safari 未必）；② 助手没启动/被 CORS 拦时，**页面会明确拦住"开始"并提示先启动助手**（探测不到就不启动；探测到但没配对会弹配对框）——看到这个提示的话按提示做即可。③ "正在监听"四个字只出现在窗口**底部日志**区，状态行显示的是"已暂停 · 端口 N"或"正在采集…"，别照着状态行找 |
 | 麦克风选错了 | 窗口里换「设备」下拉（默认「系统默认」跟着系统走）；换音源会重置为系统默认。**状态行副标题显示后端实际打开的设备**，可以据此确认切换生效 |
 | 换了麦克风但声音没变 | 现在不会发生了：设备名解析不出就报错并退回原设备（`parec` 未知设备名会静默回落默认源，这是旧版本的坑） |
 

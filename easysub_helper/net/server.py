@@ -77,6 +77,7 @@ class HelperServer(object):
                  default_source="system", backend="auto", device=None,
                  frame_ms=config.FRAME_MS, rate=config.TARGET_RATE,
                  allow_origins=(), allow_no_origin=False, allow_cors_all=False,
+                 restrict_origin=False,
                  scan_ports=True,
                  version="0.0.0", fixed_token=None, user_on=False):
         self.pairing = pairing
@@ -90,9 +91,12 @@ class HelperServer(object):
         self.rate = int(rate)
         self.allow_origins = tuple(allow_origins or ())
         self.allow_no_origin = bool(allow_no_origin)
-        #: CORS 全放行：任意 Origin 都回 CORS 头（Web 版部署在别的域名/https 预览站用）。
-        # 安全前提：助手只监听 127.0.0.1，配对码是唯一凭据——外部网页拿不到音频。
+        #: **默认就是 CORS 全放行**（产品要求）：任意 Origin 都回 CORS 头，用户不需要任何设置。
+        # 安全前提：助手只监听回环，音频要配对码换来的设备令牌——外部网页拿不到音频。
+        # 这个字段保留只为兼容旧参数/旧调用（语义上等同默认）。
         self.allow_cors_all = bool(allow_cors_all)
+        #: 显式收紧（CLI：`--restrict-origin`）：退回"本机页面 + 扩展 + 显式列出的来源"白名单。
+        self.restrict_origin = bool(restrict_origin)
         self.scan_ports = bool(scan_ports)
         self.version = version
         #: 窗口「启动 / 暂停」总开关。默认关：不按启动，谁也不会被采集。
@@ -290,19 +294,21 @@ class HelperServer(object):
         return self.pairing.token_valid(token)
 
     def _origin_allowed(self, origin, allow_missing=False):
-        if self.allow_cors_all and origin:
-            return True
+        # 默认全放行（见 security.origin_ok）；只有显式 restrict_origin 才走白名单。
+        # `allow_cors_all` 保留为兼容参数：在 restrict 模式下它仍能强制全放行。
+        restrict = self.restrict_origin and not self.allow_cors_all
         return security.origin_ok_or_missing(
             origin, self.port, self.allow_origins,
             self.allow_no_origin or allow_missing,
+            restrict=restrict,
         )
 
     def _cors_headers(self, request):
-        """只对**放行过的** Origin 回 CORS 头。
+        """给请求的 Origin 回 CORS 头（**默认对任意 Origin 都回** —— 产品要求：不做手动设置）。
 
-        配对接口要支持跨源（扩展面板的 Origin 是 chrome-extension://…，Web 版可能部署在
-        别的端口/域名），但绝不能回 `*`——否则本机任意网页都能探测并尝试配对。
-        未被放行的 Origin 不回 CORS 头，浏览器就会把响应拦掉。
+        用户明确要求过 CORS 全放行：部署在任何域名的 Web 版、预览站、任何扩展都要开箱能用。
+        安全边界不在这里（只监听回环 + 配对码换令牌 + 失败限速），详见 `security.origin_ok`。
+        只有显式 `--restrict-origin` 收紧后，未被放行的 Origin 才不回 CORS 头。
         """
         origin = request.headers.get("Origin")
         if origin and self._origin_allowed(origin):

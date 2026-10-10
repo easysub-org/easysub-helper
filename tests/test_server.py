@@ -242,10 +242,13 @@ class HttpTest(ServerCase):
         self.with_server(body)
 
     def test_pair_rejects_disallowed_origin(self):
-        """Origin 白名单必须是**真闸门**：不允许的来源连正确配对码也不给令牌。
+        """**显式收紧**（`--restrict-origin`）时，白名单是真闸门：不允许的来源连正确码也不给令牌。
 
-        （独立审查发现：以前只回不回 CORS 头，请求照样被处理并下发 token。）
+        （默认是全放行 —— 产品要求，见 test_pairs_from_any_origin_by_default。
+         独立审查发现过：以前只回不回 CORS 头，请求照样被处理并下发 token。）
         """
+        self.server.restrict_origin = True
+
         async def body(session):
             async with session.post(self.base + "/api/pair", json={"code": self.code},
                                     headers={"Origin": "https://evil.example.com"}) as resp:
@@ -258,7 +261,9 @@ class HttpTest(ServerCase):
         self.with_server(body)
 
     def test_pair_rejects_simple_request_from_evil_origin(self):
-        """不触发 CORS 预检的"简单请求"（text/plain）同样要被拒。"""
+        """收紧模式下，不触发 CORS 预检的"简单请求"（text/plain）同样要被拒。"""
+        self.server.restrict_origin = True
+
         async def body(session):
             async with session.post(self.base + "/api/pair", data=json.dumps({"code": self.code}),
                                     headers={"Origin": "https://evil.example.com",
@@ -267,13 +272,12 @@ class HttpTest(ServerCase):
 
         self.with_server(body)
 
-    def test_pairs_from_any_origin_when_cors_all(self):
-        """`allow_cors_all` 下任意 Origin 都能配对：这是 Web 版部署在别的域名时
-        要的效果（前置判断已由它自己 user-evidence 完成 = 用户在助手点对top湧码）。
+    def test_pairs_from_any_origin_by_default(self):
+        """**默认**（不加任何开关）任意 Origin 都能配对：这是产品要求 —— CORS 全放行，
+        部署在任何域名/预览站的 Web 版都要开箱能用，不许让用户去找 `--allow-cors-all`。
 
-        安全前提不变：令牌仍然是配对码换来的 —— 放行的是 Origin 白名单，不是鉴权。
+        安全前提不变：令牌仍然是配对码换来的 —— 放行的是 Origin，不是鉴权。
         """
-        self.server.allow_cors_all = True
         origin = "https://easysub-preview.example.com"
 
         async def body(session):
@@ -288,7 +292,9 @@ class HttpTest(ServerCase):
         self.with_server(body)
 
     def test_pair_info_omits_cors_unless_origin_allowed(self):
-        """未放行的来源拿不到 CORS 头（浏览器会拦掉响应）—— 白名单才是防线。"""
+        """收紧模式下未放行的来源拿不到 CORS 头（浏览器会拦掉响应）—— 白名单才是防线。"""
+        self.server.restrict_origin = True
+
         async def body(session):
             async with session.get(self.base + "/api/pair/info",
                                    headers={"Origin": "https://easysub-preview.example.com"}) as resp:
@@ -393,7 +399,21 @@ class HttpTest(ServerCase):
 
         self.with_server(body)
 
-    def test_cors_only_for_allowed_origin(self):
+    def test_cors_headers_for_any_origin_by_default(self):
+        """默认对**任意** Origin 都回 CORS 头（产品要求：不做手动设置）。"""
+        async def body(session):
+            for origin in (self.origin, "https://evil.example.com",
+                           "https://easysub-preview.example.com"):
+                async with session.get(self.base + "/api/pair/info",
+                                       headers={"Origin": origin}) as resp:
+                    self.assertEqual(resp.headers.get("Access-Control-Allow-Origin"), origin)
+
+        self.with_server(body)
+
+    def test_cors_only_for_allowed_origin_when_restricted(self):
+        """显式收紧后，未放行的来源不回 CORS 头（浏览器会拦掉响应）。"""
+        self.server.restrict_origin = True
+
         async def body(session):
             async with session.get(self.base + "/api/pair/info",
                                    headers={"Origin": self.origin}) as resp:

@@ -53,20 +53,36 @@ class OriginTest(unittest.TestCase):
         self.assertTrue(security.origin_ok("http://localhost:3000", 8790))
         self.assertTrue(security.origin_ok("https://[::1]:8443", 8790))
 
-    def test_remote_and_missing_rejected(self):
-        self.assertFalse(security.origin_ok("https://evil.example.com", 8790))
-        self.assertFalse(security.origin_ok("http://192.168.1.10:8790", 8790), "局域网地址不算本机")
-        self.assertFalse(security.origin_ok("file:///tmp/x.html", 8790))
+    def test_default_allows_any_origin(self):
+        """**默认全放行**（产品要求，用户反复强调）：部署在任何域名/端口的 Web 版开箱能用，
+        不需要用户去找 `--allow-origin` / `--allow-cors-all` 这类开关。
+        """
+        for origin in ("https://evil.example.com", "http://192.168.1.10:8790",
+                       "https://easysub.example.com", "http://127.0.0.1:5173",
+                       "null"):
+            self.assertTrue(security.origin_ok(origin, 8790), origin)
+        # 缺失/空 Origin 仍拒绝：浏览器一定带 Origin，放了它等于给非浏览器客户端开口子
         self.assertFalse(security.origin_ok(None, 8790))
         self.assertFalse(security.origin_ok("", 8790))
-        self.assertFalse(security.origin_ok("null", 8790))
 
-    def test_extra_origins(self):
-        # 非扩展来源必须显式放行（例如自建的 Web 版部署在别的端口/域名上）
+    def test_restrict_mode_rejects_unlisted(self):
+        """显式收紧（`--restrict-origin`）才退回白名单语义。"""
+        self.assertFalse(security.origin_ok("https://evil.example.com", 8790, restrict=True))
+        self.assertFalse(security.origin_ok("http://192.168.1.10:8790", 8790, restrict=True))
+        self.assertFalse(security.origin_ok("file:///tmp/x.html", 8790, restrict=True))
+        self.assertFalse(security.origin_ok("null", 8790, restrict=True))
+        self.assertFalse(security.origin_ok(None, 8790, restrict=True))
+        self.assertFalse(security.origin_ok("", 8790, restrict=True))
+        # 收紧模式下本机页面与扩展照旧放行
+        self.assertTrue(security.origin_ok("http://127.0.0.1:5173", 8790, restrict=True))
+        self.assertTrue(security.origin_ok("chrome-extension://abc", 8790, restrict=True))
+
+    def test_extra_origins_in_restrict_mode(self):
+        # 收紧模式下要额外放行别处部署的 Web 版，用 extra 显式列出
         web = "http://192.168.1.9:8322"
-        self.assertFalse(security.origin_ok(web, 8790))
-        self.assertTrue(security.origin_ok(web, 8790, extra=[web]))
-        self.assertFalse(security.origin_ok("https://evil.example.com", 8790, extra=[web]))
+        self.assertFalse(security.origin_ok(web, 8790, restrict=True))
+        self.assertTrue(security.origin_ok(web, 8790, extra=[web], restrict=True))
+        self.assertFalse(security.origin_ok("https://evil.example.com", 8790, extra=[web], restrict=True))
 
     def test_missing_origin_opt_in(self):
         self.assertFalse(security.origin_ok_or_missing(None, 8790))
@@ -88,12 +104,14 @@ class ExtensionOriginTest(unittest.TestCase):
 
     def test_extension_scheme_only_is_not_enough(self):
         # 只有 scheme、没有 ID 的字符串不算扩展来源；非扩展 scheme 一律走白名单
+        # （默认全放行时这些都会被放行，所以要在 **收紧模式** 下验证匹配逻辑本身）
         self.assertFalse(security.is_extension_origin("chrome-extension://"))
-        self.assertFalse(security.origin_ok("file:///tmp/x.html", 8790))
-        self.assertFalse(security.origin_ok("https://chrome-extension://evil", 8790))
+        self.assertFalse(security.origin_ok("file:///tmp/x.html", 8790, restrict=True))
+        self.assertFalse(security.origin_ok("https://chrome-extension://evil", 8790, restrict=True))
 
     def test_can_be_turned_off(self):
-        self.assertFalse(security.origin_ok("chrome-extension://abc", 8790, allow_extensions=False))
+        self.assertFalse(security.origin_ok("chrome-extension://abc", 8790,
+                                            allow_extensions=False, restrict=True))
 
 
 class WildcardOriginTest(unittest.TestCase):
@@ -107,20 +125,28 @@ class WildcardOriginTest(unittest.TestCase):
 
     ORIGIN = "https://easysub-preview.example.com"
 
-    def test_default_is_closed(self):
-        # 默认必须关：非回环、非扩展、不在白名单 → 拒绝
-        self.assertFalse(security.origin_ok(self.ORIGIN, 8790))
-        self.assertFalse(security.origin_ok(self.ORIGIN, 8790, extra=()))
-        self.assertFalse(security.origin_ok(self.ORIGIN, 8790, extra=["https://other.example"]))
+    def test_default_is_open(self):
+        """默认全放行 —— 用户要求：不许把 CORS 变成需要手动设置的开关。"""
+        self.assertTrue(security.origin_ok(self.ORIGIN, 8790))
+        self.assertTrue(security.origin_ok(self.ORIGIN, 8790, extra=()))
+        self.assertTrue(security.origin_ok(self.ORIGIN, 8790, extra=["https://other.example"]))
+
+    def test_restrict_mode_is_closed(self):
+        # 显式收紧后，只有白名单来源放行
+        self.assertFalse(security.origin_ok(self.ORIGIN, 8790, restrict=True))
+        self.assertFalse(security.origin_ok(self.ORIGIN, 8790, extra=(), restrict=True))
+        self.assertFalse(security.origin_ok(self.ORIGIN, 8790,
+                                            extra=["https://other.example"], restrict=True))
 
     def test_wildcard_allows_any_origin(self):
-        self.assertTrue(security.origin_ok(self.ORIGIN, 8790, extra=["*"]))
+        # 收紧模式下 `"*"` 表示"回到全放行"
+        self.assertTrue(security.origin_ok(self.ORIGIN, 8790, extra=["*"], restrict=True))
 
     def test_wildcard_keeps_existing_judgements(self):
         # '*' 不掩盖回环/扩展的既有判定；也不等于"缺 Origin 也放行"
-        self.assertTrue(security.origin_ok("http://127.0.0.1:5173", 8790, extra=["*"]))
-        self.assertTrue(security.origin_ok("chrome-extension://abc", 8790, extra=["*"]))
-        self.assertFalse(security.origin_ok("", 8790, extra=["*"]))
+        self.assertTrue(security.origin_ok("http://127.0.0.1:5173", 8790, extra=["*"], restrict=True))
+        self.assertTrue(security.origin_ok("chrome-extension://abc", 8790, extra=["*"], restrict=True))
+        self.assertFalse(security.origin_ok("", 8790, extra=["*"], restrict=True))
 
 
 if __name__ == "__main__":
