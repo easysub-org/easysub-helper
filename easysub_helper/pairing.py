@@ -107,6 +107,10 @@ class PairingManager(object):
         self._attempts = []
         self._locked_until = 0.0
         self._tokens = {}   # hash -> {"label":..., "created":...}
+        #: 本次会话里被解绑掉的 digest：合并落盘时不能再从磁盘捞回来
+        self._forgotten = set()
+        #: “全部解绑”过：之后不再与磁盘合并（否则一存盘就复活）
+        self._forgot_all = False
         self.code_ttl = float(code_ttl)
         self.max_attempts = int(max_attempts)
         self.attempt_window = float(attempt_window)
@@ -224,6 +228,7 @@ class PairingManager(object):
         if not digest:
             return False
         with self._lock:
+            self._forgotten.add(digest)
             removed = self._tokens.pop(digest, None) is not None
         if removed and self.persist:
             self._save()
@@ -232,6 +237,7 @@ class PairingManager(object):
     def forget_all(self):
         with self._lock:
             count = len(self._tokens)
+            self._forgot_all = True
             self._tokens = {}
         if self.persist:
             self._save()
@@ -252,18 +258,62 @@ class PairingManager(object):
                     "label": item.get("label") or "browser",
                     "created": int(item.get("created") or 0),
                 }
+        # 解绑墓碑是**跨实例**的：另一个实例可能还留着被解绑设备的旧记忆，
+        # 它整表落盘时会（按并集）把它写回来 —— 所以墓碑要跟设备表一起落盘（见 _merged_tokens）。
+        for digest in data.get("forgotten") or []:
+            if isinstance(digest, str) and digest:
+                self._forgotten.add(digest)
 
     def _save(self):
         with self._save_lock:                       # 见 __init__: _save_lock 的说明
             return self._save_unlocked()
+
+    def _merged_tokens(self):
+        """内存里的设备表 + 磁盘上的（并集）—— 两个实例共用一份 pairing.json 时别互相抹掉。
+
+        坑（审查交叉确认）：两个助手实例各写同一份文件、都是整表覆写 → 先配对好的设备令牌会
+        被另一个实例抹掉，用户看到的是"刚配对好、过一会儿又要重新配对"。
+        取并集后，两边的设备都留得住；本次会话里解绑过的 digest（`_forgotten`）不再捞回来，
+        "全部解绑"过则完全不合并。
+        """
+        tokens = dict(self._tokens)
+        if self._forgot_all:
+            return tokens
+        try:
+            with open(self._store, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:                            # noqa: BLE001 - 读不到就当没有
+            return tokens
+        if not isinstance(data, dict):
+            return tokens
+        # 磁盘上的墓碑也要尊重：别的实例解绑过的，不能因为"我内存里还有"就写回来
+        forgotten = set(self._forgotten)
+        for digest in data.get("forgotten") or []:
+            if isinstance(digest, str) and digest:
+                forgotten.add(digest)
+        # 关键：磁盘上的墓碑也要从**我自己的内存**里剔除 —— 否则"另一个实例解绑过、
+        # 而我还记着它"时，并集又会把它写回去（我自己的测试抓到过这个洞）。
+        for digest in forgotten:
+            tokens.pop(digest, None)
+        for item in data.get("tokens") or []:
+            if not isinstance(item, dict) or not item.get("hash"):
+                continue
+            digest = item["hash"]
+            if digest in forgotten or digest in tokens:
+                continue
+            tokens[digest] = {"label": item.get("label") or "browser",
+                              "created": int(item.get("created") or 0)}
+        return tokens
 
     def _save_unlocked(self):
             data = {
                 "version": STORE_VERSION,
                 "tokens": [
                     {"hash": h, "label": v.get("label"), "created": v.get("created")}
-                    for h, v in self._tokens.items()
+                    for h, v in self._merged_tokens().items()
                 ],
+                # 墓碑（最多留 200 条，够用且不会无限长）
+                "forgotten": sorted(self._forgotten)[-200:],
             }
             tmp = self._store + ".tmp"
             try:

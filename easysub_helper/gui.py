@@ -450,9 +450,10 @@ class HelperWindow(object):
                                          command=self.manage_devices)
         self.devices_button.grid(row=2, column=1, sticky="e", pady=(8, 0))
         if getattr(self.server, "fixed_token", None):
-            # 调试模式（--token 固定令牌）根本没有"配对设备"这回事：禁用而不是给个点了没反应的按钮
-            self.devices_label.configure(text=t("gui.pairDebug"))
-            self.devices_button.state(["disabled"])
+            # 调试模式（--token 固定令牌）根本没有"配对设备"这回事：整行收起来
+            # （不摆了又禁用，也不复用 pairDebug —— 同屏已经有一句一样的了）
+            self.devices_label.grid_remove()
+            self.devices_button.grid_remove()
 
         # 设置行（用户可用性审查：助手"关窗即停服务"，用户手滑关掉窗口浏览器那边就废了）
         self.settings = ttk.Frame(outer)
@@ -632,10 +633,11 @@ class HelperWindow(object):
                 t("log.openSourceFailed", error=exc))
 
     def _status_with_port(self, text):
-        """状态行永远带上端口：页面离线框里那句"助手状态行里那个「端口 N」"要靠它。
+        """给能拿到端口的状态都补上端口：页面离线框里那句"助手状态行里那个「端口 N」"靠它。
 
         坑（独立审查）：以前只有"已暂停"那一态显示端口，用户点了「启动」之后照着页面文案
-        去状态行找端口就找不到了。
+        去状态行找端口就找不到了。**启动中/启动失败**不经过这里（那时还没有可用端口，
+        页面也探不到），所以别宣称"任何状态都有"。
         """
         port = getattr(self.server, "port", None)
         if not port:
@@ -930,8 +932,15 @@ class HelperWindow(object):
         self.level_field_label.configure(text=t("gui.levelLabel"))
         self.quit_button.configure(text=t("gui.quit"))
         self.tray_box.configure(text=t("gui.minimizeToTray"))
+        # 坑（复审抓到的自己引入的 bug）：这里以前无条件把提示改成 gui.trayUnavailable 且
+        # 没传 install= —— 于是① macOS 上"不支持托盘"的正确说明被覆盖成"缺 pystray/Pillow"，
+        # ② t() 对缺参数是静默的，用户看到字面量 {install}。只有真的"不可用"时才重取文案，
+        # 而且用 tray.unavailable_reason()（它内部会带上安装命令）。
         if getattr(self, "tray_hint", None) is not None:
-            self.tray_hint.configure(text=t("gui.trayUnavailable"))
+            if not tray.available():
+                self.tray_hint.configure(text=tray.unavailable_reason())
+            elif getattr(self, "_tray_hint_text", ""):
+                self.tray_hint.configure(text=self._tray_hint_text)
         if self._tray is not None:
             self._tray.refresh()
         self.pair_frame.configure(text=t("gui.pairTitle"))
@@ -1118,10 +1127,12 @@ class HelperWindow(object):
         self._tray = None
         self.tray_var.set(False)
         config.set_setting("minimize_to_tray", False)
-        self._show_tray_hint(tray.unavailable_reason())
+        # 真实原因（而不是"缺 pystray"——用户明明装着）：复审 m2
+        self._show_tray_hint(t("gui.trayStartFailed", error=reason))
         logging.getLogger("easysub-helper").warning(t("log.trayFailed", error=reason))
 
     def _show_tray_hint(self, text):
+        self._tray_hint_text = text          # 切语言时按这个重画（见 retranslate）
         if getattr(self, "tray_hint", None) is not None:
             self.tray_hint.configure(text=text)
             self.tray_hint.grid()

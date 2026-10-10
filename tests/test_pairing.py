@@ -126,6 +126,49 @@ class TokenTest(unittest.TestCase):
         self.assertFalse(mgr.forget(None))
         self.assertFalse(mgr.forget(""))
 
+    def test_save_merges_the_other_instances_devices(self):
+        """两个实例共用一份 pairing.json 时不能互相抹掉设备令牌。
+
+        审查交叉确认的真实症状：两个助手实例各写同一份文件、都是整表覆写 → 先配对好的设备
+        令牌被另一个实例抹掉，用户看到"刚配对好、过一会儿又要重新配对"。
+        """
+        import tempfile, os
+        path = os.path.join(tempfile.mkdtemp(), "pairing.json")
+        a = pairing.PairingManager(store_path=path)
+        b = pairing.PairingManager(store_path=path)
+        a.issue_token("chrome")            # A 配对 → 落盘
+        b.issue_token("firefox")           # B 先加载（只有 A 的），再签发自己的
+        # B 落盘时应把 A 的设备一起带上
+        c = pairing.PairingManager(store_path=path)
+        labels = sorted(item["label"] for item in c.list_devices())
+        self.assertEqual(labels, ["chrome", "firefox"], labels)
+
+    def test_forget_is_not_resurrected_by_a_merge(self):
+        import tempfile, os
+        path = os.path.join(tempfile.mkdtemp(), "pairing.json")
+        a = pairing.PairingManager(store_path=path)
+        a.issue_token("chrome")
+        victim = a.list_devices()[0]["digest"]
+        b = pairing.PairingManager(store_path=path)   # 另一个实例还认为它存在
+        self.assertTrue(a.forget(victim))
+        b.issue_token("firefox")                      # B 落盘（会合并磁盘）
+        c = pairing.PairingManager(store_path=path)
+        digests = [item["digest"] for item in c.list_devices()]
+        self.assertNotIn(victim, digests, "解绑过的设备不能被合并复活")
+
+    def test_forget_all_is_not_undone_by_a_merge(self):
+        import tempfile, os
+        path = os.path.join(tempfile.mkdtemp(), "pairing.json")
+        a = pairing.PairingManager(store_path=path)
+        a.issue_token("chrome")
+        a.forget_all()
+        self.assertEqual(a.list_devices(), [])
+        b = pairing.PairingManager(store_path=path)
+        b.issue_token("firefox")
+        c = pairing.PairingManager(store_path=path)
+        self.assertEqual([item["label"] for item in c.list_devices()], ["firefox"],
+                         "「全部解绑」之后不该把旧设备合并回来")
+
     def test_forget_all(self):
         mgr = pairing.PairingManager(persist=False)
         token = mgr.issue_token()

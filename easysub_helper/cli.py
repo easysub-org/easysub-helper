@@ -29,7 +29,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "easysub_helper"
 
-from . import __version__, config, security
+from . import __version__, config, instance, security
 from .i18n import LANGUAGES, detect_language, set_language, source_label, t
 from .net import HelperServer
 from .pairing import PairingManager, format_code
@@ -167,6 +167,21 @@ def _port_warning_needed(port):
     return port < first or port + config.PORT_SCAN_RANGE > last or port != first
 
 
+def _port_warning_needed(port):
+    """用了 `--port` 就该提醒吗？
+
+    坑（独立审查 M1）：助手的顺延是**相对 `--port`** 的（server 里 `self.port + i`），
+    而字幕页面只在**绝对** 8790–8810 探测。所以 `--port 8800` 看着"在范围内"，被占后却会漂到
+    8801–8820 —— 页面照样找不到。判据必须是"基础端口不是默认值"，而不是"端口本身越界"。
+    `--port 0`（随机端口）也提醒：页面同样不可能自动找到它。
+    """
+    first = config.DEFAULT_PORT
+    last = config.DEFAULT_PORT + config.PORT_SCAN_RANGE
+    if port == 0:
+        return True
+    return port < first or port + config.PORT_SCAN_RANGE > last or port != first
+
+
 def _pid_alive(pid):
     """进程还在吗（跨平台，只用标准库）。"""
     if pid <= 0:
@@ -245,33 +260,30 @@ _PROBE_FALLBACK_BUDGET = 0.5
 
 
 def _find_running_helper(preferred_port=None, fast=False):
-    """看看本机是不是已经有助手在跑（返回它的端口，没有就 None）。
+    """本机是不是已经有助手在跑？返回它的端口（未知时返回 True），没有则 None。
 
-    为什么要拦（用户可用性审查抓到的真实坑）：两个实例**各有各的配对码**（各自内存里的），
-    却写**同一份** `pairing.json`，于是互相覆盖对方发出的设备令牌 —— 用户的表现是
-    "刚配对好、过一会儿又要重新配对"，而且照另一个窗口里的码输入还会连错五次被锁 300 秒。
+    为什么要拦（用户可用性审查）：两个实例**各有各的配对码**，却写**同一份** `pairing.json`，
+    于是互相覆盖对方发出的设备令牌 —— 用户的表现是"刚配对好、过一会儿又要重新配对"。
 
-    两道探测，且**总耗时必须有界**（见上面常量）：
-      ① 锁文件（`data_dir/helper.lock`）：精确、瞬时、不受 `http_proxy` 影响，也不管它监听
-         哪个端口/网卡 —— HTTP 探测只覆盖默认段 + 指定端口，`--port 9000` 或
-         `--host <网卡>` 的实例根本探不到（独立审查 M2）；
-      ② 少数几个端口的 HTTP 兜底（旧版本没有锁文件时仍能发现）：只探"指定端口 + 默认段前
-         三个"，并在总预算内收手，绝不为了这个检查把启动拖慢几秒。
+    两道探测，且**总耗时必须有界**（CI 的打包冒烟只给 3 秒，见下）：
+      ① 锁文件（`instance` 模块）：瞬时、精确，与端口/网卡/代理都无关 —— **窗口路径也会写**
+         （写在 `HelperServer.start()` 里），所以双击启动的实例同样能被发现；
+      ② 少数几个端口的 HTTP 兜底（旧版本没有锁文件时仍能发现）。
     """
+    known = instance.read()
+    if known:
+        # 端口未知时 instance.read() 返回 True —— 让调用方照样能提示"已有实例"
+        return known if isinstance(known, int) else True
+    if fast:
+        # 零延迟路径（命令行/无窗口，含 CI 的打包冒烟）：只认锁文件。
+        # 坑（真踩过，helper-ci 38066370590）：冒烟是"后台起服务 → sleep 3 → curl"，而 onefile
+        # 产物本身在 Windows 上就要 ~3s 才监听；探测哪怕多花 0.5s 也会把 curl 推到 listening
+        # 之前 10ms，导致假红。
+        return None
+
     import json as _json
     import time as _time
     import urllib.request as _url
-
-    port = _read_lock()
-    if port:
-        return port
-    if fast:
-        # 零延迟路径（命令行/无窗口，含 CI 的打包冒烟）：只认锁文件。
-        # 坑（真踩过，helper-ci 38066370590）：一侧的冒烟是"后台起服务 → sleep 3 → curl"，
-        # 而 onefile 产物本身在 Windows 上就要 ~3s 才监听；探测哪怕只多花 0.5s 也会把
-        # curl 推到"listening"之前 10ms，导致假红。这条路径上"多实例"的代价只是日志警告，
-        # 不值得为它牺牲启动速度。
-        return None
 
     candidates = []
     if preferred_port:
@@ -352,8 +364,7 @@ async def _rotate_pair_code(pairing):
 
 
 async def _serve(server, pairing):
-    await server.start()
-    _write_lock(server.port)                         # 单实例护栏的"我在跑"标记
+    await server.start()          # 锁由 HelperServer.start() 写（窗口路径也一样）
     state = pairing.state() if pairing is not None else {"valid": False}
     _eprint("")
     _eprint("{} v{}".format(t("app.title"), __version__))
@@ -461,7 +472,10 @@ def main(argv=None):
     # —— 启动护栏（用户可用性审查：这几个开关都能让"页面永远找不到助手"，而页面只会说
     #    "助手没在运行"）——
     first, last = config.DEFAULT_PORT, config.DEFAULT_PORT + config.PORT_SCAN_RANGE
-    if _port_warning_needed(args.port):
+    if args.port == 0:
+        # --port 0 = 随机端口，不存在"顺延"，得单独说（复审 m6）
+        _eprint(t("cli.warn.portZero"))
+    elif _port_warning_needed(args.port):
         _eprint(t("cli.warn.portOutOfRange", port=args.port, first=first, last=last))
     if not security.is_loopback_host(args.host) and args.host not in ("0.0.0.0", "::"):
         _eprint(t("cli.warn.hostSpecific", host=args.host))
@@ -477,14 +491,9 @@ def main(argv=None):
         else:
             # 窗口化打包（Windows --noconsole / macOS --windowed）下 stderr 是黑洞：
             # 只 _eprint 会让用户以为"双击没反应"（独立审查 B2）。有 GUI 就弹窗让用户选。
-            answer = None
-            try:
-                from . import gui as _gui
-
-                if _gui.available():
-                    answer = _ask_keep_second_instance(running)
-            except Exception:                        # noqa: BLE001
-                answer = None
+            # 只有真的有图形界面时才弹窗 —— `--no-gui`（脚本/服务用法）绝不弹模态窗，
+            # 否则命令行/无人值守场景会被一个没人点的对话框挂住（复审 M4）。
+            answer = _ask_keep_second_instance(running) if has_gui else None
             if not answer:
                 _eprint(t("cli.err.multiInstance", port=running))
                 logging.getLogger("easysub-helper").warning(
@@ -499,8 +508,7 @@ def main(argv=None):
     server, pairing = build_server(args, user_on=not use_gui)
 
     def cleanup():
-        _clear_lock()
-        return server.stop()
+        return server.stop()          # stop() 里会 release() 掉自己的锁
 
     if use_gui:
         gui.install_log_buffer()

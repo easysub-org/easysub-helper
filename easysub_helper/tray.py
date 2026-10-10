@@ -13,9 +13,11 @@
 ## 两条硬约束（独立审查抓到的，别再踩）
 
 1. **macOS 上 pystray 的 `Icon.run()` 必须在主线程**（官方文档：OSX 后端否则会失败），
-   而我们的主线程被 tkinter 的 `mainloop()` 占着 —— 两者不可能同时满足。
-   所以 macOS 上直接 `available() == False`（宁可不给托盘，也不能给一个"看着勾上了、
-   实际没图标、窗口却已经被收走"的隐形进程）。
+   而我们的主线程被 tkinter 的 `mainloop()` 占着。pystray 另有一条 `run_detached()` 的路子
+   （官方 FAQ 说它"主要就是为 macOS 准备的"），但它与 Tk 主循环如何共存**我们没有验证过**，
+   所以 macOS 上先直接 `available() == False`（宁可不给托盘，也不能给一个"看着勾上了、
+   实际没图标、窗口却已经被收走"的隐形进程）。等有人在 mac 真机上验证过 `run_detached`
+   再放开这条。
 2. **`start()` 返回 True 不代表图标真的起来了**：`run()` 里的异常没人接。所以用
    `run(setup=...)` 拿到"图标就绪"回调，GUI 侧再确认 `ready()` 才允许"关窗只收窗口"
    （见 gui.on_close）——托盘没就绪就绝不隐藏窗口。
@@ -80,8 +82,18 @@ class Tray(object):
 
     # ---------------- 状态 ----------------
     def ready(self):
+        """图标**真的挂上去了**吗（`_ready` 只说明 setup 跑过，还要看 visible）。
+
+        托盘运行中途死掉（桌面/explorer 重启）时 visible 会变 False → 这时不许再"关窗只收窗口"，
+        否则用户既没窗口也没图标（复审 m12）。
+        """
         with self._lock:
-            return self._ready
+            if not self._ready:
+                return False
+        try:
+            return bool(self._icon is not None and self._icon.visible)
+        except Exception:                            # noqa: BLE001
+            return False
 
     def failed(self):
         with self._lock:
@@ -121,7 +133,20 @@ class Tray(object):
         return True
 
     def _on_ready(self, icon):
-        """pystray 在图标**真正就绪**后回这里（这是唯一的就绪信号）。"""
+        """pystray 在图标就绪后回这里。
+
+        **坑（独立审查 blocker，务必别再省这一行）**：pystray 规定"若自定义 setup，
+        必须自己把 `visible` 置 True"（默认 setup 才会自动置）—— 少了它，图标**永不出现**，
+        而 `ready()` 已经为 True → 关窗就把窗口收走 → 又变成"没有窗口、没有图标、服务还在跑"
+        的隐形进程（这次 Windows/Linux 也会，比修之前更糟）。
+        所以：这里显式置 visible，并且 `ready()` 以 `icon.visible` 为准。
+        """
+        try:
+            icon.visible = True
+        except Exception as exc:                    # noqa: BLE001 - 置不起来就当托盘失败
+            with self._lock:
+                self._failed = "cannot show tray icon: {}".format(exc)
+            return
         with self._lock:
             self._ready = True
 

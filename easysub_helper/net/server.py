@@ -34,7 +34,7 @@ import time
 
 from aiohttp import web
 
-from .. import config, protocol, security
+from .. import config, instance, protocol, security
 from ..audio import BackendError, CaptureSession, create_backend
 from ..audio import devices as audio_devices
 from ..i18n import get_language, t
@@ -176,6 +176,9 @@ class HelperServer(object):
         return app
 
     async def start(self):
+        # 单实例标记（见 instance 模块）：**绑定之前**先占位，堵住"双击没反应→再双击一次"
+        # 撞进 `检查 → 绑定` 那段宽窗口（onefile 产物约 3 秒）的 TOCTOU。绑定后再更正端口。
+        instance.claim(getattr(self, "port", None) or None)
         # 坑（第十一轮审查）：`_shutting_down` 以前只置位不复位，是个**永久闩锁** ——
         # `stop()` → `start()` 之后 `_open_locked` 会永远拒绝开设备（实测永远采不了）。
         # 当前 GUI/CLI 生命周期不会复用同一个 HelperServer，所以不可达；但复位一行更安全。
@@ -222,6 +225,9 @@ class HelperServer(object):
                     if self.port:
                         break
             self.started_at = time.monotonic()
+            # 绑定成功后用**真实端口**更正锁（`--port 0` 时端口是系统给的）。
+            # 放在这里而不是只在 CLI 里写，是为了覆盖窗口路径（复审 M1）。
+            instance.update(self.port)
             LOG.info(t("log.listening", url=self.base_url))
             return candidate
         await self._runner.cleanup()
@@ -230,6 +236,8 @@ class HelperServer(object):
                              count=len(ports), error=last_err))
 
     async def stop(self):
+        # 退出时清掉自己的锁（`instance.release` 只认自己的 pid，不会误删别人的 —— 复审 M3）
+        instance.release()
         self._shutting_down = True
         self.user_on = False
         # 关闭也是一次意图变化（并发审计 F6）：让在飞的重启/开设备作废，
