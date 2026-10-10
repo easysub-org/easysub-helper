@@ -91,10 +91,52 @@ class InstanceTest(unittest.TestCase):
         self.assertFalse(instance.pid_alive(999999999))
         self.assertFalse(instance.pid_alive("abc"))
 
+    @unittest.skipIf(os.name == "nt", "POSIX 分支：Windows 走 OpenProcess，见下一条")
     def test_pid_alive_treats_permission_denied_as_alive(self):
         """权限不足 ≠ 进程不存在：宁可误报"已有实例"，也别放行第二个实例去覆盖配对数据。"""
         with mock.patch("os.kill", side_effect=PermissionError("denied")):
             self.assertTrue(instance.pid_alive(1))
+
+    @unittest.skipUnless(os.name == "nt", "Windows 用 OpenProcess 判断存在性")
+    def test_pid_alive_treats_access_denied_as_alive_on_windows(self):
+        """坑（CI 抓到的）：这条语义在 Windows 上走的是 OpenProcess 分支 —— 只 patch os.kill
+        在 Windows 上根本不起作用（我第一版就是这么写的，Windows 作业直接红）。
+
+        ACCESS_DENIED(5) 说明进程**存在**但没权限打开（例如它以管理员身份跑）→ 必须当"活着"。
+        """
+        import ctypes
+
+        class FakeKernel32(object):
+            def OpenProcess(self, *args):
+                return 0                      # 打不开
+
+            def GetLastError(self):
+                return 5                      # ERROR_ACCESS_DENIED
+
+            def CloseHandle(self, *args):
+                return 1
+
+        fake = mock.Mock(kernel32=FakeKernel32())
+        with mock.patch.object(ctypes, "windll", fake):
+            self.assertTrue(instance.pid_alive(1))
+
+    @unittest.skipUnless(os.name == "nt", "Windows 用 OpenProcess 判断存在性")
+    def test_pid_alive_false_when_windows_says_gone(self):
+        import ctypes
+
+        class FakeKernel32(object):
+            def OpenProcess(self, *args):
+                return 0
+
+            def GetLastError(self):
+                return 87                     # ERROR_INVALID_PARAMETER：进程不存在
+
+            def CloseHandle(self, *args):
+                return 1
+
+        fake = mock.Mock(kernel32=FakeKernel32())
+        with mock.patch.object(ctypes, "windll", fake):
+            self.assertFalse(instance.pid_alive(999999999))
 
 
 if __name__ == "__main__":
