@@ -72,6 +72,49 @@ class LockTest(unittest.TestCase):
             # 锁文件优先：它不受 http_proxy 影响，也不管实例监听哪个端口/网卡
             self.assertEqual(cli._find_running_helper(), 9000)
 
+    def test_fallback_probe_is_bounded_and_never_slow(self):
+        """坑：CI 的打包冒烟是"后台起服务 → sleep 3 → curl"。第一版护栏把 22 个端口逐个
+        0.2s 超时探测（Windows 上防火墙会丢 SYN → 走超时），启动被拖 ~4.4s，冒烟直接红
+        （helper-ci 38064062965 / 38065887519）。所以 HTTP 兜底必须是**有界**的。
+        """
+        import time as _time
+        import urllib.request as _url
+
+        calls = []
+
+        class SlowOpener(object):
+            def open(self, url, timeout=None):
+                calls.append(url)
+                _time.sleep(0.5)          # 模拟"连不通但要等超时"的最坏情况
+                raise OSError("no listener")
+
+        with mock.patch.object(_url, "build_opener", return_value=SlowOpener()):
+            started = _time.monotonic()
+            self.assertIsNone(cli._find_running_helper(9100))
+            elapsed = _time.monotonic() - started
+        self.assertLess(elapsed, 1.5, "探测总耗时必须有界（否则会把启动拖过冒烟的 sleep）")
+        self.assertLessEqual(len(calls), 4, "兜底探测只该探少数几个端口")
+
+    def test_fallback_probe_finds_helper_on_preferred_port(self):
+        import urllib.request as _url
+
+        class FakeResponse(object):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b'{"app": "easysub-helper"}'
+
+        class Opener(object):
+            def open(self, url, timeout=None):
+                return FakeResponse()
+
+        with mock.patch.object(_url, "build_opener", return_value=Opener()):
+            self.assertEqual(cli._find_running_helper(9100), 9100)
+
     def test_clear_lock(self):
         cli._write_lock(8790)
         cli._clear_lock()

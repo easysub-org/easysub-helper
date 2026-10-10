@@ -236,6 +236,14 @@ def _clear_lock():
         pass
 
 
+#: HTTP 兜底探测的候选端口个数上限与超时。
+#: **有界**是硬要求：CI 的打包冒烟是"后台起服务 → sleep 3 → curl"，而 Windows 上防火墙会
+#: 把"连一个没人听的端口"变成**超时**（不是秒拒）—— 22 个端口 × 0.2s ≈ 4.4s 会把启动拖过
+#: 那 3 秒，冒烟直接红（真实踩过：helper-ci 38064062965 / 38065887519）。
+_PROBE_FALLBACK_TIMEOUT = 0.1
+_PROBE_FALLBACK_BUDGET = 0.5
+
+
 def _find_running_helper(preferred_port=None):
     """看看本机是不是已经有助手在跑（返回它的端口，没有就 None）。
 
@@ -243,29 +251,34 @@ def _find_running_helper(preferred_port=None):
     却写**同一份** `pairing.json`，于是互相覆盖对方发出的设备令牌 —— 用户的表现是
     "刚配对好、过一会儿又要重新配对"，而且照另一个窗口里的码输入还会连错五次被锁 300 秒。
 
-    两道探测：
-      ① 锁文件（`data_dir/helper.lock`）：精确、不受 `http_proxy` 影响、也不管它监听哪个端口
-         —— HTTP 探测只覆盖 8790–8810 + 指定端口，`--port 9000` 或 `--host <网卡>` 的实例
-         以前根本探不到（独立审查 M2）；
-      ② `/api/pair/info` 兜底（锁文件被删/旧版本没有锁文件时仍能发现）。
+    两道探测，且**总耗时必须有界**（见上面常量）：
+      ① 锁文件（`data_dir/helper.lock`）：精确、瞬时、不受 `http_proxy` 影响，也不管它监听
+         哪个端口/网卡 —— HTTP 探测只覆盖默认段 + 指定端口，`--port 9000` 或
+         `--host <网卡>` 的实例根本探不到（独立审查 M2）；
+      ② 少数几个端口的 HTTP 兜底（旧版本没有锁文件时仍能发现）：只探"指定端口 + 默认段前
+         三个"，并在总预算内收手，绝不为了这个检查把启动拖慢几秒。
     """
     import json as _json
+    import time as _time
     import urllib.request as _url
 
     port = _read_lock()
     if port:
         return port
 
-    ports = []
+    candidates = []
     if preferred_port:
-        ports.append(preferred_port)
-    ports.extend(range(config.DEFAULT_PORT, config.DEFAULT_PORT + config.PORT_SCAN_RANGE + 1))
+        candidates.append(preferred_port)
+    candidates.extend(range(config.DEFAULT_PORT, config.DEFAULT_PORT + 3))
     # 走代理会让"本机探测"整个失效（环境里有 http_proxy 时 urlopen 会把 127.0.0.1 也代理出去）
     opener = _url.build_opener(_url.ProxyHandler({}))
-    for candidate in ports:
+    deadline = _time.monotonic() + _PROBE_FALLBACK_BUDGET
+    for candidate in candidates:
+        if _time.monotonic() >= deadline:
+            break
         try:
             with opener.open("http://127.0.0.1:{}/api/pair/info".format(candidate),
-                             timeout=0.2) as resp:
+                             timeout=_PROBE_FALLBACK_TIMEOUT) as resp:
                 payload = _json.loads(resp.read().decode("utf-8", "replace"))
         except Exception:          # noqa: BLE001 - 连不上/不是助手：都算"没有"
             continue
