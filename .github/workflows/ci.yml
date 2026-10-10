@@ -113,8 +113,19 @@ jobs:
           PORT=$(python -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
           ./dist/easysub-helper --no-gui --port "$PORT" --lang en &
           APP=$!
-          sleep 3
-          curl -fsS "http://127.0.0.1:$PORT/api/pair/info" | grep -q '"app": "easysub-helper"'
+          # 坑：以前是死等 `sleep 3`，而 onefile 产物在 Windows 上本身就要 ~3s 才监听 ——
+          # 差 10ms 就假红过（helper-ci 38066370590：curl "after 0 ms" 与 listening 同一秒）。
+          # 改成**有上限的就绪轮询**：仍然是"必须真的答上"（15 秒内答不上就红），
+          # 但不再依赖"恰好卡在启动时间上"。
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:$PORT/api/pair/info" | grep -q '"app": "easysub-helper"'; then
+              ready=1
+              break
+            fi
+            sleep 0.5
+          done
+          [ "$ready" = 1 ] || { echo "helper did not answer within 15s"; exit 1; }
           kill $APP
       - uses: actions/upload-artifact@v4
         with:
@@ -157,8 +168,19 @@ jobs:
           PORT=$(python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
           ./dist/easysub-helper --no-gui --port "$PORT" --lang en &
           APP=$!
-          sleep 3
-          curl -fsS "http://127.0.0.1:$PORT/api/pair/info" | grep -q '"app": "easysub-helper"'
+          # 坑：以前是死等 `sleep 3`，而 onefile 产物在 Windows 上本身就要 ~3s 才监听 ——
+          # 差 10ms 就假红过（helper-ci 38066370590：curl "after 0 ms" 与 listening 同一秒）。
+          # 改成**有上限的就绪轮询**：仍然是"必须真的答上"（15 秒内答不上就红），
+          # 但不再依赖"恰好卡在启动时间上"。
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:$PORT/api/pair/info" | grep -q '"app": "easysub-helper"'; then
+              ready=1
+              break
+            fi
+            sleep 0.5
+          done
+          [ "$ready" = 1 ] || { echo "helper did not answer within 15s"; exit 1; }
           kill $APP
       - uses: actions/upload-artifact@v4
         with:
@@ -200,8 +222,19 @@ jobs:
           PORT=$(python -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
           ./dist/easysub-helper.exe --no-gui --port "$PORT" --lang en &
           APP=$!
-          sleep 3
-          curl -fsS "http://127.0.0.1:$PORT/api/pair/info" | grep -q '"app": "easysub-helper"'
+          # 坑：以前是死等 `sleep 3`，而 onefile 产物在 Windows 上本身就要 ~3s 才监听 ——
+          # 差 10ms 就假红过（helper-ci 38066370590：curl "after 0 ms" 与 listening 同一秒）。
+          # 改成**有上限的就绪轮询**：仍然是"必须真的答上"（15 秒内答不上就红），
+          # 但不再依赖"恰好卡在启动时间上"。
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:$PORT/api/pair/info" | grep -q '"app": "easysub-helper"'; then
+              ready=1
+              break
+            fi
+            sleep 0.5
+          done
+          [ "$ready" = 1 ] || { echo "helper did not answer within 15s"; exit 1; }
           kill $APP
       - uses: actions/upload-artifact@v4
         with:

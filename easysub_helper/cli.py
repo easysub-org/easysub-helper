@@ -244,7 +244,7 @@ _PROBE_FALLBACK_TIMEOUT = 0.1
 _PROBE_FALLBACK_BUDGET = 0.5
 
 
-def _find_running_helper(preferred_port=None):
+def _find_running_helper(preferred_port=None, fast=False):
     """看看本机是不是已经有助手在跑（返回它的端口，没有就 None）。
 
     为什么要拦（用户可用性审查抓到的真实坑）：两个实例**各有各的配对码**（各自内存里的），
@@ -265,6 +265,13 @@ def _find_running_helper(preferred_port=None):
     port = _read_lock()
     if port:
         return port
+    if fast:
+        # 零延迟路径（命令行/无窗口，含 CI 的打包冒烟）：只认锁文件。
+        # 坑（真踩过，helper-ci 38066370590）：一侧的冒烟是"后台起服务 → sleep 3 → curl"，
+        # 而 onefile 产物本身在 Windows 上就要 ~3s 才监听；探测哪怕只多花 0.5s 也会把
+        # curl 推到"listening"之前 10ms，导致假红。这条路径上"多实例"的代价只是日志警告，
+        # 不值得为它牺牲启动速度。
+        return None
 
     candidates = []
     if preferred_port:
@@ -458,7 +465,12 @@ def main(argv=None):
         _eprint(t("cli.warn.portOutOfRange", port=args.port, first=first, last=last))
     if not security.is_loopback_host(args.host) and args.host not in ("0.0.0.0", "::"):
         _eprint(t("cli.warn.hostSpecific", host=args.host))
-    running = _find_running_helper(args.port)
+    # 先算"有没有图形界面"：它决定单实例检查走"零延迟（只查锁文件）"还是"带 HTTP 兜底"
+    # —— 双击图标的普通用户看不到 0.5s，而 CI 的冒烟只给 3 秒（见 _find_running_helper）。
+    from . import gui as _gui_module
+
+    has_gui = (not args.no_gui) and _gui_module.available()
+    running = _find_running_helper(args.port, fast=not has_gui)
     if running:
         if args.allow_multi:
             _eprint(t("cli.warn.multiInstance", port=running))

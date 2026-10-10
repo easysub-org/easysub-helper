@@ -95,6 +95,23 @@ class LockTest(unittest.TestCase):
         self.assertLess(elapsed, 1.5, "探测总耗时必须有界（否则会把启动拖过冒烟的 sleep）")
         self.assertLessEqual(len(calls), 4, "兜底探测只该探少数几个端口")
 
+    def test_fast_path_never_touches_the_network(self):
+        """命令行/无窗口路径必须**零延迟**：CI 的打包冒烟只给 3 秒，而 onefile 产物自己就要
+        约 3 秒才监听 —— 多 0.5s 就会假红（helper-ci 38066370590 的 `after 0 ms` 对比
+        `listening` 同一秒即可看出是这种"差 10ms"的假红）。"""
+        import urllib.request as _url
+
+        calls = []
+
+        class Opener(object):
+            def open(self, url, timeout=None):
+                calls.append(url)
+                raise OSError("no listener")
+
+        with mock.patch.object(_url, "build_opener", return_value=Opener()):
+            self.assertIsNone(cli._find_running_helper(9100, fast=True))
+        self.assertEqual(calls, [], "fast 路径不允许发任何 HTTP 请求")
+
     def test_fallback_probe_finds_helper_on_preferred_port(self):
         import urllib.request as _url
 
