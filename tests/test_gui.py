@@ -468,6 +468,98 @@ class WindowTest(WindowCase):
         self.assertLessEqual(y1, canvas.winfo_reqheight())
 
     # ---- 设备下拉（只服务坐在本机的人；页面不需要选设备）----
+    def test_pair_code_auto_rotates_after_expiry(self):
+        """配对码过期后窗口必须**自己换一个**（不能让用户拿着死码反复输直到被锁）。"""
+        import time as _time
+
+        from easysub_helper.i18n import t
+
+        mgr = self.window.pairing
+        self.assertIsNotNone(mgr)
+        old = mgr.new_code()
+        mgr._code_expires = _time.time() - 1          # 人为过期
+        self.window._refresh_pair_code()
+        self.assertTrue(mgr.has_valid_code(), "过期后窗口应自动生成新码")
+        self.assertNotEqual(mgr.state()["code"], old, "自动轮换必须是新码")
+        self.assertEqual(self.window._shown_code, mgr.state()["code"])
+        self.assertEqual(self.window.pair_hint.cget("text"), t("gui.pairHint"))
+
+    def test_locked_hint_points_at_the_unlock_button(self):
+        """被锁时必须提示"点「换一个」立即解锁"（真解就是它，但提示以前没说）。"""
+        from easysub_helper.i18n import t
+
+        mgr = self.window.pairing
+        mgr.new_code()
+        for _ in range(mgr.max_attempts):
+            mgr.verify("WRONG1")
+        self.assertGreater(mgr.state()["lockedForSec"], 0, "应当已被锁定")
+        self.window._refresh_pair_code()
+        text = self.window.pair_hint.cget("text")
+        self.assertIn(t("gui.pairNew"), text, "锁定提示必须告诉用户点「换一个」")
+        # 点「换一个」立即解锁（这是 pairing 的既有语义，界面现在把它说出来了）
+        self.window.new_code()
+        self.assertEqual(mgr.state()["lockedForSec"], 0)
+
+    def test_devices_row_reflects_paired_count(self):
+        from easysub_helper.i18n import t
+
+        self.window.pairing.issue_token("chrome")
+        self.window._shown_devices = None
+        self.window._refresh_pair_code()
+        self.assertEqual(self.window.devices_label.cget("text"), t("gui.devicesCount", count=1))
+
+    def test_manage_devices_opens_and_unbinds(self):
+        """「管理…」要能打开设备窗口；解绑后计数归零（以前只能手删 pairing.json）。"""
+        mgr = self.window.pairing
+        mgr.issue_token("chrome")
+        self.window.manage_devices()
+        self.window.root.update()
+        toplevels = [w for w in self.window.root.winfo_children() if w.winfo_class() == "Toplevel"]
+        self.assertTrue(toplevels, "应当弹出一个设备窗口")
+        for win in toplevels:
+            win.destroy()
+        self.window.root.update()
+        self.assertTrue(mgr.forget_all())          # 全部解绑走的是 pairing 的入口
+        self.assertEqual(mgr.list_devices(), [])
+
+    def test_tray_control_exists(self):
+        """设置行要有「关窗最小化到托盘」勾选框；装不上 pystray 时禁用并说明原因。"""
+        from easysub_helper.i18n import t
+
+        self.assertEqual(self.window.tray_box.cget("text"), t("gui.minimizeToTray"))
+        # 本环境没装 pystray → 托盘勾选框必须**禁用**并给出原因，而不是点了没反应
+        from unittest import mock
+
+        from easysub_helper import gui as gui_mod
+
+        with mock.patch.object(gui_mod.tray, "available", return_value=False):
+            self.assertFalse(gui_mod.tray.available())
+        self.assertIn("disabled", str(self.window.tray_box.state()))
+
+    def test_close_without_tray_quits(self):
+        """没开托盘时，关窗仍然 = 退出（保持原有语义，不悄悄留一个后台进程）。"""
+        self.window._tray = None
+        self.window.tray_var.set(True)          # 勾了但托盘不可用 → 仍应退出
+        self.window.on_close()
+        self.assertTrue(self.window._closing, "关窗应当真的走退出")
+
+    def test_close_with_tray_only_hides_the_window(self):
+        """开了托盘时，关窗只收窗口：服务与采集继续（用户可用性审查的诉求）。"""
+        class FakeTray(object):
+            def stop(self):
+                pass
+
+            def refresh(self):
+                pass
+
+        self.window._tray = FakeTray()
+        self.window.tray_var.set(True)
+        self.window.on_close()
+        self.assertFalse(self.window._closing, "收进托盘时不能退出服务")
+        self.assertEqual(self.window.root.state(), "withdrawn")
+        self.window.show_window()
+        self.assertNotEqual(self.window.root.state(), "withdrawn")
+
     def test_device_list_is_filled_from_enumeration(self):
         original = gui.devices.list_devices
         gui.devices.list_devices = lambda source="mic": [

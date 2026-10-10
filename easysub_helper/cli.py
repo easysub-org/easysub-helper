@@ -152,6 +152,31 @@ def resolve_language(argv=None):
 
 
 # ---------------- 服务 ----------------
+def _find_running_helper(preferred_port=None):
+    """看看本机是不是已经有助手在跑（返回它的端口，没有就 None）。
+
+    为什么要拦（用户可用性审查抓到的真实坑）：两个实例**各有各的配对码**（各自内存里的），
+    却写**同一份** `pairing.json`，于是互相覆盖对方发出的设备令牌 —— 用户的表现是
+    "刚配对好、过一会儿又要重新配对"，而且照另一个窗口里的码输入还会连错五次被锁 300 秒。
+    """
+    import json as _json
+    import urllib.request as _url
+
+    ports = []
+    if preferred_port:
+        ports.append(preferred_port)
+    ports.extend(range(config.DEFAULT_PORT, config.DEFAULT_PORT + config.PORT_SCAN_RANGE + 1))
+    for port in ports:
+        try:
+            with _url.urlopen("http://127.0.0.1:{}/api/pair/info".format(port), timeout=0.2) as resp:
+                payload = _json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception:          # noqa: BLE001 - 连不上/不是助手：都算"没有"
+            continue
+        if isinstance(payload, dict) and payload.get("app") == "easysub-helper":
+            return port
+    return None
+
+
 def build_server(args, user_on=False):
     """按参数造服务。`user_on` 是窗口总开关的初值（无窗口模式下直接 True）。"""
     fixed_token = args.token or None
@@ -241,7 +266,8 @@ def build_parser():
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--no-gui", action="store_true", help=t("cli.help.nogui"))
     parser.add_argument("--port", type=int, default=config.DEFAULT_PORT,
-                        help=t("cli.help.port", default=config.DEFAULT_PORT))
+                        help=t("cli.help.port", default=config.DEFAULT_PORT,
+                               last=config.DEFAULT_PORT + config.PORT_SCAN_RANGE))
     parser.add_argument("--host", default=config.DEFAULT_HOST, help=t("cli.help.host"))
     parser.add_argument("--allow-lan", action="store_true", help=t("cli.help.allowlan"))
     parser.add_argument("--source", default="system", choices=["system", "mic"],
@@ -257,10 +283,12 @@ def build_parser():
                         metavar="ORIGIN", help=t("cli.help.restrictorigin"))
     # 下面两个是历史参数，保留只为不弄坏旧脚本/旧文档里的命令；现在**已不需要**
     # （默认就是全放行；--allow-origin 也成了 restrict 模式下的补充白名单）。
+    # 历史参数：保留以便旧命令/旧脚本不报错，但从 --help 里**藏起来** ——
+    # 帮助里列着"已不需要"的开关，本身就是又一次诱导用户去"设置一下"。
     parser.add_argument("--allow-origin", action="append", default=[],
-                        help=t("cli.help.alloworigin"))
-    parser.add_argument("--allow-cors-all", action="store_true",
-                        help=t("cli.help.corsall"))
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--allow-cors-all", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--allow-multi", action="store_true", help=t("cli.help.allowmulti"))
     parser.add_argument("--selftest", action="store_true",
                         help=t("cli.help.selftest"))
     parser.add_argument("--require-tkinter", action="store_true",
@@ -289,6 +317,20 @@ def main(argv=None):
     if not security.is_loopback_host(args.host) and not args.allow_lan:
         _eprint(t("run.err.hostNotLoopback", host=args.host))
         return 2
+
+    # —— 启动护栏（用户可用性审查：这几个开关都能让"页面永远找不到助手"，而页面只会说
+    #    "助手没在运行"）——
+    first, last = config.DEFAULT_PORT, config.DEFAULT_PORT + config.PORT_SCAN_RANGE
+    if args.port not in (0,) and not (first <= args.port <= last):
+        _eprint(t("cli.warn.portOutOfRange", port=args.port, first=first, last=last))
+    if not security.is_loopback_host(args.host) and args.host not in ("0.0.0.0", "::"):
+        _eprint(t("cli.warn.hostSpecific", host=args.host))
+    running = _find_running_helper(args.port)
+    if running:
+        if not args.allow_multi:
+            _eprint(t("cli.err.multiInstance", port=running))
+            return 2
+        _eprint(t("cli.warn.multiInstance", port=running))
 
     from . import gui
 

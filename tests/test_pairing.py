@@ -103,6 +103,29 @@ class TokenTest(unittest.TestCase):
         self.assertEqual(len(mgr.list_devices()), 1)
         self.assertEqual(mgr.list_devices()[0]["label"], "chrome")
 
+    def test_list_devices_includes_digest_and_forget_one(self):
+        """列表要带 digest，且能**只解绑一个**（窗口里「解绑」按钮靠它）。
+
+        坑（用户可用性审查）：`list_devices()/forget_all()` 以前是死代码，界面上没有入口，
+        用户想撤销某个已配对设备只能自己去删 pairing.json。
+        """
+        mgr = pairing.PairingManager(persist=False)
+        mgr.issue_token("chrome")
+        mgr.issue_token("firefox")
+        items = mgr.list_devices()
+        self.assertEqual(len(items), 2)
+        for entry in items:
+            self.assertIn("digest", entry, "列表项必须带 digest，否则界面无法定向解绑")
+            self.assertTrue(entry["digest"])
+        victim = items[0]["digest"]
+        self.assertTrue(mgr.forget(victim))
+        self.assertFalse(mgr.forget(victim), "重复解绑同一个应返回 False")
+        left = mgr.list_devices()
+        self.assertEqual(len(left), 1)
+        self.assertNotEqual(left[0]["digest"], victim)
+        self.assertFalse(mgr.forget(None))
+        self.assertFalse(mgr.forget(""))
+
     def test_forget_all(self):
         mgr = pairing.PairingManager(persist=False)
         token = mgr.issue_token()

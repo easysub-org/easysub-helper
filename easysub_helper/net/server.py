@@ -362,17 +362,19 @@ class HelperServer(object):
         return self._json(request, {}, status=204)
 
     async def handle_pair(self, request):
-        # **无令牌端点：Origin 白名单在这里是真闸门**（不只是加 CORS 响应头）。
-        # 之前只回响应头、照样处理请求 —— 一个不触发预检的"简单请求"（text/plain、无 Content-Type）
-        # 就能从任意网页驱动配对尝试，与本文件"白名单是唯一防线"的说法不符（独立审查发现）。
-        # 没有 Origin 的请求（curl/脚本等非浏览器客户端）按 allow_no_origin 决定；
-        # 浏览器一定带 Origin，所以这条不会放松对网页的约束。
+        # **无令牌端点**：Origin 在这里被检查 —— 但注意**默认是全放行**（产品要求：CORS 不做
+        # 手动设置，见 security.origin_ok）。只有用户显式 --restrict-origin 收紧后，
+        # 未列出的来源才真被挡在这里。真正拦住"任意网页偷音频"的是**配对码 + 设备令牌 +
+        # 失败限速**，不是 Origin。
+        # 缺 Origin 的请求（curl/脚本等非浏览器客户端）按 allow_no_origin 决定 —— 浏览器一定带
+        # Origin，所以这条既不放松对网页的约束，也不能把"缺 Origin"说成"来源不被允许"。
         origin = request.headers.get("Origin")
         if not self._origin_allowed(origin, allow_missing=self.allow_no_origin):
             logging.getLogger("easysub-helper").warning(
                 t("log.pairOriginDenied", origin=origin or t("log.noOrigin")))
+            message = t("server.err.originMissing") if not origin else t("server.err.originDenied")
             return self._json(request, {"ok": False, "code": protocol.ERR_FORBIDDEN,
-                                        "message": t("server.err.originDenied")}, status=403)
+                                        "message": message}, status=403)
         if self.pairing is None and not self.fixed_token:
             return self._json(request, {"ok": False, "code": protocol.ERR_FORBIDDEN,
                                         "message": t("server.err.forbidden")}, status=403)
@@ -390,7 +392,9 @@ class HelperServer(object):
                                         "label": _clean_label(body.get("label"), "debug")})
         ok, reason = self.pairing.verify(body.get("code"))
         if not ok:
-            LOG.warning(t("log.pairFailed", reason=reason, origin=request.headers.get("Origin")))
+            # 日志里别再打协议裸码（"配对失败：locked" 对来日志找原因的普通用户毫无意义）
+            LOG.warning(t("log.pairFailed", reason=self.pairing.error_message(reason),
+                          origin=request.headers.get("Origin")))
             status = 429 if reason == ERR_LOCKED else 403
             return self._json(request, {
                 "ok": False,

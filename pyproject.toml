@@ -50,6 +50,8 @@ dependencies = [
 # （pyaudiowpatch 那种需要 CPython 扩展的，在 py3.6/3.7 + Win7 上经常没有可用 wheel）。
 # Linux 上还有零依赖的 parec/pw-record 子进程后端，见 easysub_helper.audio。
 capture = ["soundcard>=0.4.2,<0.5"]
+#: 系统托盘（可选）：装上就能"关窗不杀服务"。装不上也不影响其它功能（见 easysub_helper/tray.py）。
+tray = ["pystray>=0.19", "pillow>=9"]
 # 高质量重采样（带状态、任意比）。缺失时自动回落到内置多相 FIR，功能不受影响。
 # 注意：soxr 新版要求 py>=3.9，老解释器上装不上就直接跳过这个 extra。
 quality = ["soxr>=0.3.7 ; python_version >= '3.9'"]

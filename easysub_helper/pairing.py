@@ -204,10 +204,27 @@ class PairingManager(object):
         return False
 
     def list_devices(self):
+        """已配对设备列表（**含 digest**，供窗口里的「解绑」用）。
+
+        坑（用户可用性审查）：这两个方法以前是**死代码** —— 窗口/CLI 都不调，
+        于是用户想撤销一个已配对设备（送修、换机、怀疑令牌泄露）只能自己去猜
+        `pairing.json` 的路径删文件（三平台路径还各不相同）。现在窗口里有了
+        「已配对设备 → 管理…」入口。
+        """
         with self._lock:
-            items = list(self._tokens.values())
+            items = [dict(entry, digest=digest) for digest, entry in self._tokens.items()]
         items.sort(key=lambda x: x.get("created", 0))
         return items
+
+    def forget(self, digest):
+        """解绑单个设备（按 list_devices() 里的 digest）。返回是否真的删掉了。"""
+        if not digest:
+            return False
+        with self._lock:
+            removed = self._tokens.pop(digest, None) is not None
+        if removed and self.persist:
+            self._save()
+        return removed
 
     def forget_all(self):
         with self._lock:

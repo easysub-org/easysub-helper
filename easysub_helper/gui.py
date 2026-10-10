@@ -41,6 +41,7 @@ if __package__ in (None, ""):
     __package__ = "easysub_helper"
 
 from . import config
+from . import tray
 from .audio import devices
 from .i18n import LANGUAGES, get_language, set_language, source_label, t
 from .pairing import format_code
@@ -190,6 +191,7 @@ class HelperWindow(object):
         self._loop = None
         self._thread = None
         self._closing = False
+        self._tray = None
         self._boot_error = None
         self._shown_code = None
         self._shown_ttl = None
@@ -220,7 +222,7 @@ class HelperWindow(object):
         self.root.title(t("gui.title"))
         self._set_window_icon()
         self.root.minsize(430, 560)
-        self.root.protocol("WM_DELETE_WINDOW", self.quit)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._setup_style()
         self._build()
         self._sync_device_picker()
@@ -346,7 +348,10 @@ class HelperWindow(object):
             ttk.Label(header, image=logo).grid(row=0, column=0, rowspan=2, padx=(0, 10))
         self.title_label = ttk.Label(header, text=t("gui.title"), style="Title.TLabel")
         self.title_label.grid(row=0, column=1, sticky="w")
-        self.subtitle_label = ttk.Label(header, text=t("gui.subtitle"), style="Sub.TLabel",
+        # macOS 上不能说"不需要装虚拟声卡"：14.2+ 免驱，更早的系统要 BlackHole
+        # （用户可用性审查抓到：窗口副标题与打包事实相反，直接摧毁用户对文档的信任）
+        self._subtitle_key = "gui.subtitleMac" if sys.platform == "darwin" else "gui.subtitle"
+        self.subtitle_label = ttk.Label(header, text=t(self._subtitle_key), style="Sub.TLabel",
                                         justify="left", wraplength=330)
         self.subtitle_label.grid(row=1, column=1, sticky="w", pady=(2, 0))
         # 语言切换：按钮上写"另一种语言"的名字，点一下就地重译并记住
@@ -432,9 +437,33 @@ class HelperWindow(object):
         self.pair_hint = ttk.Label(self.pair_frame, text=t("gui.pairHint"), style="Hint.TLabel",
                                    justify="left", wraplength=380)
         self.pair_hint.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        # 已配对设备 + 解绑入口（用户可用性审查：以前撤销一个已配对设备只能自己去删
+        # pairing.json —— 三平台路径还各不相同，普通用户根本做不到）
+        self.devices_label = ttk.Label(self.pair_frame, text=t("gui.devicesCount", count=0),
+                                       style="Hint.TLabel")
+        self.devices_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.devices_button = ttk.Button(self.pair_frame, text=t("gui.devicesManage"),
+                                         command=self.manage_devices)
+        self.devices_button.grid(row=2, column=1, sticky="e", pady=(8, 0))
+
+        # 设置行（用户可用性审查：助手"关窗即停服务"，用户手滑关掉窗口浏览器那边就废了）
+        self.settings = ttk.Frame(outer)
+        self.settings.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        self.tray_var = self.tk.BooleanVar(value=False)
+        self.tray_box = ttk.Checkbutton(
+            self.settings, text=t("gui.minimizeToTray"), variable=self.tray_var,
+            command=self._on_tray_toggle)
+        self.tray_box.grid(row=0, column=0, sticky="w")
+        if not tray.available():
+            # 装不上就说清楚，而不是给一个点了没反应的勾选框
+            self.tray_box.state(["disabled"])
+            self.tray_var.set(False)
+            self.tray_hint = ttk.Label(self.settings, text=t("gui.trayUnavailable"),
+                                       style="Hint.TLabel", wraplength=380, justify="left")
+            self.tray_hint.grid(row=1, column=0, sticky="w")
 
         footer = ttk.Frame(outer)
-        footer.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        footer.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         footer.columnconfigure(0, weight=1)
         self.keep_open_label = ttk.Label(footer, text=t("gui.keepOpen"), style="Hint.TLabel",
                                          justify="left", wraplength=360)
@@ -447,8 +476,8 @@ class HelperWindow(object):
 
         # 日志（排障时才看，所以放最下面且不抢眼）
         self.log_frame = ttk.LabelFrame(outer, text=t("gui.logLabel"), padding=(8, 4, 8, 6))
-        self.log_frame.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
-        outer.rowconfigure(8, weight=1)
+        self.log_frame.grid(row=9, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
+        outer.rowconfigure(9, weight=1)
         self.log_frame.columnconfigure(0, weight=1)
         self.log_frame.rowconfigure(0, weight=1)
         self.log_text = self.tk.Text(self.log_frame, height=7, wrap="none", font=self.font_mono_small,
@@ -713,6 +742,26 @@ class HelperWindow(object):
         self.pairing.ensure_code()
         state = self.pairing.state()
         if not state.get("valid"):
+            # 坑（用户可用性审查抓到的**死路**）：以前这里直接 return —— 窗口于是**永远**
+            # 显示上一次的码与"N 秒内有效"，而 server 侧早就作废了。用户照抄 → 报"码不正确/
+            # 已过期" → 再抄 → 五次之后被锁 300 秒，而窗口连"已锁定"都不显示。
+            # 现在：码失效就**自动换一个**（等价于替用户点「换一个」，顺带解除锁定）。
+            self.pairing.new_code()
+            state = self.pairing.state()
+            self._shown_code = None
+            self._shown_ttl = None
+        locked = int(state.get("lockedForSec") or 0)
+        if locked:
+            hint = t("gui.pairLocked", sec=locked)
+            if self.pair_hint.cget("text") != hint:
+                self.pair_hint.configure(text=hint)
+        elif self.pair_hint.cget("text") != t("gui.pairHint"):
+            self.pair_hint.configure(text=t("gui.pairHint"))
+        devices = int(state.get("devices") or 0)
+        if devices != getattr(self, "_shown_devices", None):
+            self._shown_devices = devices
+            self.devices_label.configure(text=t("gui.devicesCount", count=devices))
+        if not state.get("valid"):
             return
         code = state["code"]
         if code != self._shown_code:
@@ -725,6 +774,76 @@ class HelperWindow(object):
             self.pair_frame.configure(
                 text="{}  ·  {}".format(t("gui.pairTitle"),
                                         t("gui.pairTtl", sec=state["remainingSec"])))
+
+    def manage_devices(self):
+        """「已配对设备」窗口：看列表 + 解绑（单个或全部）。
+
+        坑（用户可用性审查）：`PairingManager.list_devices()/forget_all()` 早已存在却是**死代码**
+        —— 界面里没有入口，用户想撤销一个已配对设备（送修、换机、怀疑令牌泄露）只能自己去猜
+        `pairing.json` 的路径删文件。这里把它接上。
+        """
+        if self.pairing is None:
+            return
+        items = self.pairing.list_devices()
+        win = self.tk.Toplevel(self.root)
+        win.title(t("gui.devicesTitle"))
+        win.transient(self.root)
+        win.resizable(False, False)
+        frame = self.ttk.Frame(win, padding=(12, 10, 12, 10))
+        frame.grid(row=0, column=0, sticky="nsew")
+        self.ttk.Label(frame, text=t("gui.devicesHint"), style="Hint.TLabel",
+                  wraplength=420, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
+        box = self.tk.Listbox(frame, height=max(3, min(8, len(items) or 3)), width=50,
+                              activestyle="none", font=self.font_mono_small, relief="flat",
+                              highlightthickness=1, highlightbackground="#e5e7eb",
+                              selectmode="extended")
+        box.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 6))
+        digests = []
+        for entry in items:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(entry.get("created", 0) or 0))
+            box.insert("end", "{}  ·  {}".format(entry.get("label") or "browser",
+                                                 t("gui.deviceWhen", when=when)))
+            digests.append(entry.get("digest"))
+        if not items:
+            box.insert("end", t("gui.devicesEmpty"))
+
+        def report(count):
+            if count:
+                logging.getLogger("easysub-helper").info(t("gui.devicesUnbound", count=count))
+            self._shown_devices = None
+            self._refresh()
+
+        def unbind_selected():
+            selected = sorted(box.curselection(), reverse=True)
+            if not selected:
+                return
+            removed = 0
+            for index in selected:
+                digest = digests[index] if index < len(digests) else None
+                if digest and self.pairing.forget(digest):
+                    removed += 1
+                box.delete(index)
+                if index < len(digests):
+                    del digests[index]
+            if not digests:
+                box.delete(0, "end")
+                box.insert("end", t("gui.devicesEmpty"))
+            report(removed)
+
+        def unbind_all():
+            removed = self.pairing.forget_all()
+            box.delete(0, "end")
+            del digests[:]
+            box.insert("end", t("gui.devicesEmpty"))
+            report(removed)
+
+        self.ttk.Button(frame, text=t("gui.deviceUnbind"), command=unbind_selected).grid(
+            row=2, column=0, sticky="w")
+        self.ttk.Button(frame, text=t("gui.deviceUnbindAll"), command=unbind_all).grid(
+            row=2, column=1, sticky="e")
+        self.ttk.Button(frame, text=t("gui.close"), command=win.destroy).grid(
+            row=3, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        win.bind("<Escape>", lambda _e: win.destroy())
 
     def _refresh_log(self):
         lines, total = self.log_handler.snapshot()
@@ -759,7 +878,7 @@ class HelperWindow(object):
         """把窗口里**每一个**控件文案重新取一遍（i18n 的机械保证：这里不许硬编码）。"""
         self.root.title(t("gui.title"))
         self.title_label.configure(text=t("gui.title"))
-        self.subtitle_label.configure(text=t("gui.subtitle"))
+        self.subtitle_label.configure(text=t(self._subtitle_key))
         self.lang_button.configure(text=language_label(other_language()))
         self.keep_open_label.configure(text=t("gui.keepOpen"))
         self.license_label.configure(text=t("gui.licenseSource"))
@@ -767,11 +886,20 @@ class HelperWindow(object):
         self.device_field_label.configure(text=t("gui.deviceLabel"))
         self.level_field_label.configure(text=t("gui.levelLabel"))
         self.quit_button.configure(text=t("gui.quit"))
+        self.tray_box.configure(text=t("gui.minimizeToTray"))
+        if getattr(self, "tray_hint", None) is not None:
+            self.tray_hint.configure(text=t("gui.trayUnavailable"))
+        if self._tray is not None:
+            self._tray.refresh()
         self.pair_frame.configure(text=t("gui.pairTitle"))
         self.pair_hint.configure(text=t("gui.pairHint"))
         self.copy_button.configure(text=t("gui.pairCopy"))
         self.new_button.configure(text=t("gui.pairNew"))
         self.log_frame.configure(text=t("gui.logLabel"))
+        self.devices_label.configure(text=t("gui.devicesCount",
+                                           count=getattr(self, "_shown_devices", 0)))
+        self.devices_button.configure(text=t("gui.devicesManage"))
+        self._shown_ttl = None          # 强制下一帧重建配对框标题（锁定提示也要跟着换语言）
         # 音源下拉的选项名也要跟着翻译（保持当前选择）
         index = self.source_box.current()
         self.source_box["values"] = [source_label(s) for s in SOURCE_ORDER]
@@ -909,6 +1037,49 @@ class HelperWindow(object):
         logging.getLogger("easysub-helper").info(t("log.newCode", code=format_code(code)))
         self._refresh_pair_code()
 
+    # ---------------- 登录自启 / 托盘 ----------------
+    def _on_tray_toggle(self):
+        want = bool(self.tray_var.get())
+        if want and not self._tray:
+            self._tray = tray.Tray(
+                icon_path=os.path.join(assets_dir(), "icon128.png"),
+                on_show=lambda: self._tray_action(self.show_window),
+                on_toggle=lambda: self._tray_action(self.toggle_capture),
+                on_quit=lambda: self._tray_action(self.quit),
+                is_capturing=lambda: bool(self.server and self.server.user_on),
+            )
+            if not self._tray.start():
+                self._tray = None
+                self.tray_var.set(False)
+                logging.getLogger("easysub-helper").warning(t("gui.trayUnavailable"))
+                return
+        elif not want and self._tray:
+            self._tray.stop()
+            self._tray = None
+
+    def _tray_action(self, func):
+        """托盘回调跑在 pystray 线程里：**必须**切回 tkinter 主线程再动控件。"""
+        try:
+            self.root.after(0, func)
+        except Exception:                            # noqa: BLE001 - 窗口正在销毁
+            pass
+
+    def on_close(self):
+        """点窗口的 × —— 勾了「最小化到托盘」就只收窗口，服务与采集继续。"""
+        if self._tray is not None and bool(self.tray_var.get()):
+            self.root.withdraw()
+            logging.getLogger("easysub-helper").info(t("log.minimizedToTray"))
+            return
+        self.quit()
+
+    def show_window(self):
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:                            # noqa: BLE001
+            pass
+
     def quit(self):
         if self._closing:
             return
@@ -928,6 +1099,9 @@ class HelperWindow(object):
                 loop.call_soon_threadsafe(loop.stop)
             except RuntimeError:
                 pass
+        if self._tray is not None:
+            self._tray.stop()
+            self._tray = None
         try:
             logging.getLogger().removeHandler(self.log_handler)
         except Exception:  # noqa: BLE001
