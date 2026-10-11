@@ -228,13 +228,23 @@ class TrayModuleSmokeTest(unittest.TestCase):
             self.assertIsNone(tray.compatibility_note())
 
     def test_compatibility_note_flags_xorg_on_sni_desktops(self):
-        with mock.patch.object(tray, "backend_name", return_value="pystray._xorg"):
-            with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "UKUI"}, clear=False):
-                note = tray.compatibility_note()
-                self.assertIsNotNone(note)
-                self.assertIn("UKUI", note)
-            with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "XFCE"}, clear=False):
-                self.assertIsNone(tray.compatibility_note(), "XFCE 用 XEmbed，不需要提示")
+        # 坑（CI 的 Windows 作业抓到的）：这个提示是 Linux 专属的 —— 不 patch 平台时
+        # Windows 上会直接返回 None，用例就假红。所以平台必须一起 patch。
+        with mock.patch.object(tray.sys, "platform", "linux"):
+            with mock.patch.object(tray, "backend_name", return_value="pystray._xorg"):
+                with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "UKUI"}, clear=False):
+                    note = tray.compatibility_note()
+                    self.assertIsNotNone(note)
+                    self.assertIn("UKUI", note)
+                with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "XFCE"}, clear=False):
+                    self.assertIsNone(tray.compatibility_note(), "XFCE 用 XEmbed，不需要提示")
+
+    def test_compatibility_note_is_linux_only(self):
+        # Windows/macOS 的托盘是原生的，不该出现桌面协议不匹配的提示
+        for platform in ("win32", "darwin"):
+            with mock.patch.object(tray.sys, "platform", platform):
+                with mock.patch.object(tray, "backend_name", return_value="pystray._xorg"):
+                    self.assertIsNone(tray.compatibility_note(), platform)
 
     def test_unavailable_reason_variants(self):
         with mock.patch.object(tray.sys, "platform", "linux"):
