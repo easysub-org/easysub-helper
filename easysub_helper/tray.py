@@ -28,6 +28,7 @@ import os
 import sys
 import threading
 
+from . import sni
 from .i18n import t
 
 LOG = logging.getLogger("easysub-helper")
@@ -54,16 +55,39 @@ def latin1_safe(text, fallback):
 
 
 def available():
-    """托盘能不能用（pystray + Pillow + **本平台允许**才算）。"""
+    """托盘能不能用。
+
+    Linux 上**优先** SNI（原生协议，KDE/UKUI/GNOME/LXQt 都认）；只有在拿不到会话总线或没装
+    dbus-next 时，才回落到 pystray（旧 XEmbed —— 用户实测在 UKUI 上"有槽位、没图标、点了没反应"）。
+    """
+    return selected_backend() is not None
+
+
+def selected_backend():
+    """**实际会用的**托盘后端：`"sni"` / `"pystray:<模块>"` / None（没有可用的）。
+
+    坑（用户实测 + 官方文档）：Linux 上 pystray 的 xorg/gtk 后端都是旧 XEmbed 协议，
+    KDE/UKUI/GNOME 用的是 StatusNotifier —— 表现就是"托盘里有槽位、没图标、点了没反应"。
+    所以 Linux 上只要有会话总线 + dbus-next 就走 SNI。
+    """
     if sys.platform == "darwin":
-        # 见模块开头第 1 条：macOS 要求 run() 在主线程，而我们主线程是 tkinter
-        return False
+        # macOS：pystray 的 run() 必须在主线程（被 tkinter 占着），但它提供了官方替代
+        # `run_detached()`（文档：主要是为 macOS 准备的）—— 在 Tk 主线程里安装图标，
+        # 之后由 Tk 驱动的 Cocoa runloop 继续跑。所以 macOS 上托盘是可用的。
+        try:
+            import pystray
+
+            return "pystray:" + str(pystray.Icon.__module__)
+        except Exception:                            # noqa: BLE001
+            return None
+    if sys.platform.startswith("linux") and sni.dbus_available():
+        return "sni"
     try:
-        import pystray                              # noqa: F401
-        from PIL import Image                       # noqa: F401
-    except Exception:                               # noqa: BLE001
-        return False
-    return True
+        import pystray
+
+        return "pystray:" + str(pystray.Icon.__module__)
+    except Exception:                                # noqa: BLE001
+        return None
 
 
 def backend_name():
@@ -73,12 +97,7 @@ def backend_name():
     XEmbed 后端，而 KDE/UKUI/GNOME 这些桌面走的是 StatusNotifier 协议 —— 后端与桌面协议
     不匹配时，表现就是"托盘里没有图标、点什么都没反应"。
     """
-    try:
-        import pystray
-
-        return pystray.Icon.__module__
-    except Exception:                                # noqa: BLE001
-        return None
+    return selected_backend() or ""
 
 
 def compatibility_note():
@@ -87,24 +106,29 @@ def compatibility_note():
         return None
     name = backend_name() or ""
     if not name.endswith("_xorg"):
-        return None
+        return None                       # 走 SNI 就没有这个问题
     desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or
                os.environ.get("DESKTOP_SESSION") or "").lower()
     if not any(key in desktop for key in ("kde", "ukui", "lxqt", "deepin", "gnome")):
         return None
     return t("gui.trayXorgHint", desktop=os.environ.get("XDG_CURRENT_DESKTOP")
-             or os.environ.get("DESKTOP_SESSION") or "?")
+             or os.environ.get("DESKTOP_SESSION") or "?",
+             install=install_hint())
 
 
 def unavailable_reason():
     """给用户看的"为什么没有托盘"（窗口里那一行说明）。"""
-    if sys.platform == "darwin":
-        return t("gui.trayMacUnsupported")
     return t("gui.trayUnavailable", install=install_hint())
 
 
 def install_hint():
-    """怎么让托盘可用（写进提示里，别让用户去猜）。"""
+    """怎么让托盘可用（写进提示里，别让用户去猜）。
+
+    Linux 上优先推 dbus-next：它是**原生 SNI**（图标与点击都走系统协议），而且是纯 Python，
+    普通 venv 与打包产物都能用；pystray 在 KDE/UKUI 这类桌面上图标根本显示不出来。
+    """
+    if sys.platform.startswith("linux"):
+        return "pip install dbus-next"
     return "pip install pystray pillow"
 
 
@@ -130,6 +154,7 @@ class Tray(object):
         self._icon_path = icon_path
         self._actions = actions                # queue.Queue：跨线程投递动作
         self._lock = threading.Lock()
+        self._impl = None                      # SNI 实现（优先）；None 表示走 pystray
 
     # ---------------- 状态 ----------------
     def ready(self):
@@ -138,6 +163,8 @@ class Tray(object):
         托盘运行中途死掉（桌面/explorer 重启）时 visible 会变 False → 这时不许再"关窗只收窗口"，
         否则用户既没窗口也没图标（复审 m12）。
         """
+        if self._impl is not None:
+            return self._impl.ready()
         with self._lock:
             if not self._ready:
                 return False
@@ -147,6 +174,8 @@ class Tray(object):
             return False
 
     def failed(self):
+        if self._impl is not None:
+            return self._impl.failed()
         with self._lock:
             return self._failed
 
@@ -160,34 +189,59 @@ class Tray(object):
         """菜单/标题文案：本地化优先，编码不过就退回 ASCII（见 ASCII_LABELS 的说明）。"""
         return latin1_safe(t(key), ASCII_LABELS.get(key, key))
 
+    def _make_pystray_icon(self, pystray, image):
+        """构造 pystray 图标（标题与菜单都做 latin-1 兜底，见 ASCII_TITLE 的说明）。"""
+        menu = pystray.Menu(
+            pystray.MenuItem(lambda _i: self._label("gui.trayShow"),
+                             lambda *_: self.post(self._on_show), default=True),
+            pystray.MenuItem(lambda _i: self._label("gui.trayPause") if self._is_capturing()
+                             else self._label("gui.trayStart"),
+                             lambda *_: self.post(self._on_toggle)),
+            pystray.MenuItem(lambda _i: self._label("gui.trayQuit"),
+                             lambda *_: self.post(self._on_quit)),
+        )
+        title = latin1_safe(t("gui.title"), ASCII_TITLE)
+        if title != t("gui.title"):
+            LOG.info("tray backend only accepts latin-1: falling back to ASCII labels")
+        return pystray.Icon("easysub-helper", image, title, menu)
+
     def start(self):
-        if not available() or self._icon is not None:
+        if self._icon is not None or self._impl is not None:
+            return False
+        # ① Linux 首选：SNI（D-Bus 原生协议）。用户实测 pystray 在 UKUI 上图标显示不出来。
+        if sys.platform.startswith("linux") and sni.dbus_available():
+            self._impl = sni.SNITray(self._icon_path, self._on_show, self._on_toggle,
+                                     self._on_quit, self._is_capturing, self._actions)
+            if self._impl.start():
+                LOG.info("tray backend: StatusNotifierItem (dbus-next)")
+                return True
+            self._impl = None
+            LOG.warning("SNI tray unavailable, falling back to pystray")
+        if not available():
             return False
         try:
             import pystray
             from PIL import Image
 
             image = Image.open(self._icon_path)
-            menu = pystray.Menu(
-                pystray.MenuItem(lambda _i: self._label("gui.trayShow"),
-                                 lambda *_: self.post(self._on_show), default=True),
-                pystray.MenuItem(lambda _i: self._label("gui.trayPause") if self._is_capturing()
-                                 else self._label("gui.trayStart"),
-                                 lambda *_: self.post(self._on_toggle)),
-                pystray.MenuItem(lambda _i: self._label("gui.trayQuit"),
-                                 lambda *_: self.post(self._on_quit)),
-            )
-            # 标题也必须过编码：中文标题在 X11 后端会直接抛（用户实测）
-            title = latin1_safe(t("gui.title"), ASCII_TITLE)
-            if title != t("gui.title"):
-                # 说清楚为什么托盘菜单是英文：免得用户以为翻译坏了（用户实测报了这条）
-                LOG.info("tray backend only accepts latin-1: falling back to ASCII labels")
-            self._icon = pystray.Icon("easysub-helper", image, title, menu)
+            self._icon = self._make_pystray_icon(pystray, image)
         except Exception as exc:                    # noqa: BLE001 - 托盘失败不该影响主功能
             LOG.warning("tray unavailable: %s", exc)
             self._icon = None
             return False
-        LOG.info("tray backend: %s", backend_name())
+        if sys.platform == "darwin":
+            # macOS：必须在主线程跑。tkinter 占着主线程，所以用官方的 run_detached()：
+            # 在**当前线程**（Tk 主线程）里安装图标，之后由 Tk 驱动的 Cocoa runloop 继续跑。
+            # 这条路径无法在本机（Linux）验证，已在 README 标注"待真机确认"。
+            try:
+                self._icon.run_detached(setup=self._on_ready)
+            except Exception as exc:                # noqa: BLE001
+                LOG.warning("tray unavailable: %s", exc)
+                self._icon = None
+                return False
+            LOG.info("tray backend: pystray (run_detached, main thread)")
+            return True
+        # Windows / 其它：pystray 允许在工作线程里 run（macOS 才有主线程限制）
         self._thread = threading.Thread(target=self._run, name="easysub-helper-tray")
         self._thread.daemon = True
         self._thread.start()
@@ -225,6 +279,9 @@ class Tray(object):
 
     def refresh(self):
         """让菜单文案跟着状态/语言刷新。"""
+        if self._impl is not None:
+            self._impl.refresh()
+            return
         if self._icon is not None:
             try:
                 self._icon.update_menu()
@@ -232,6 +289,13 @@ class Tray(object):
                 pass
 
     def stop(self):
+        if self._impl is not None:
+            impl, self._impl = self._impl, None
+            try:
+                impl.stop()
+            except Exception:                       # noqa: BLE001
+                pass
+            return
         icon, self._icon = self._icon, None
         with self._lock:
             self._ready = False

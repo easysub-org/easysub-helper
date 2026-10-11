@@ -51,7 +51,8 @@ dependencies = [
 # Linux 上还有零依赖的 parec/pw-record 子进程后端，见 easysub_helper.audio。
 capture = ["soundcard>=0.4.2,<0.5"]
 #: 系统托盘（可选）：装上就能"关窗不杀服务"。装不上也不影响其它功能（见 easysub_helper/tray.py）。
-tray = ["pystray>=0.19", "pillow>=9"]
+tray = ["pystray>=0.19", "pillow>=9", "dbus-next>=0.2.3"]
+#: Linux 的托盘走原生 StatusNotifierItem（dbus-next）；pystray 是其它平台/兜底。
 # 高质量重采样（带状态、任意比）。缺失时自动回落到内置多相 FIR，功能不受影响。
 # 注意：soxr 新版要求 py>=3.9，老解释器上装不上就直接跳过这个 extra。
 quality = ["soxr>=0.3.7 ; python_version >= '3.9'"]

@@ -11,6 +11,7 @@
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -90,10 +91,56 @@ class TrayReadinessTest(unittest.TestCase):
         actions.get_nowait()()
         self.assertEqual(calls, [1])
 
-    def test_macos_is_reported_unavailable(self):
-        with mock.patch.object(tray.sys, "platform", "darwin"):
-            self.assertFalse(tray.available())
-            self.assertIn("macOS", tray.unavailable_reason())
+    def test_macos_uses_pystray_run_detached(self):
+        """macOS 不是"没有托盘"：pystray 的 run() 必须在主线程，但它有官方替代
+        `run_detached()` —— 要求是"所有系统都能用"，所以 macOS 走这条路。
+
+        这里用假 pystray 验证两件事：① `run_detached` 被调用；② 它在**调用线程**（Tk 主线程）
+        里被调用，而不是像 Windows 那样另起线程（另起线程正是 macOS 上会失败的原因）。
+        """
+        import sys as _sys
+
+        calls = {"thread": None, "setup_called": False}
+
+        class FakeIconMac(object):
+            def __init__(self, name, image, title, menu):
+                self.title = title
+                self.visible = False
+
+            def run_detached(self, setup=None):
+                calls["thread"] = threading.current_thread().name
+                if setup is not None:
+                    setup(self)
+                    calls["setup_called"] = True
+
+            def run(self, setup=None):
+                raise AssertionError("macOS 上绝不能走 run()（它要求主线程、会失败）")
+
+            def stop(self):
+                self.visible = False
+
+            def update_menu(self):
+                pass
+
+        fake = type("FakePystray", (object,), {})()
+        fake.MenuItem = FakeMenuItem
+        fake.Menu = FakeMenu
+        fake.Icon = FakeIconMac
+        modules = _fake_modules()
+        modules["pystray"].Icon = FakeIconMac
+
+        with mock.patch.dict(_sys.modules, modules):
+            with mock.patch.object(tray.sys, "platform", "darwin"):
+                self.assertFalse(tray.sni.dbus_available() if False else False)  # 保持可读性
+                tray_obj = make_tray()
+                try:
+                    self.assertTrue(tray_obj.start(), "macOS 上托盘应当可用")
+                    self.assertEqual(calls["thread"], threading.current_thread().name,
+                                     "run_detached 必须在调用线程（Tk 主线程）里执行")
+                    self.assertTrue(calls["setup_called"])
+                    self.assertTrue(tray_obj.ready())
+                finally:
+                    tray_obj.stop()
 
     def test_install_hint_used_in_the_reason(self):
         with mock.patch.object(tray.sys, "platform", "linux"):
@@ -190,8 +237,6 @@ class TrayModuleSmokeTest(unittest.TestCase):
                 self.assertIsNone(tray.compatibility_note(), "XFCE 用 XEmbed，不需要提示")
 
     def test_unavailable_reason_variants(self):
-        with mock.patch.object(tray.sys, "platform", "darwin"):
-            self.assertIn("macOS", tray.unavailable_reason())
         with mock.patch.object(tray.sys, "platform", "linux"):
             with mock.patch.object(tray, "available", return_value=False):
                 self.assertIn(tray.install_hint(), tray.unavailable_reason())
@@ -214,16 +259,18 @@ class TrayEncodingTest(unittest.TestCase):
 
         with mock.patch.dict(_sys.modules, _fake_modules()):
             with mock.patch.object(tray, "available", return_value=True):
-                t = make_tray()
-                try:
-                    self.assertTrue(t.start(), "托盘应当能起来（标题已降级为 ASCII）")
-                    self.assertEqual(t._icon.title, tray.ASCII_TITLE)
-                    # 菜单标签也必须能在 latin-1 后端渲染
-                    for item in t._icon.menu.items:
-                        self.assertIsInstance(item.text(None), str)
-                        self.assertTrue(item.text(None).isascii(), item.text(None))
-                finally:
-                    t.stop()
+                # 本机会话总线活着 → 默认会走 SNI；这条用例专门测 pystray 路径
+                with mock.patch.object(tray.sni, "dbus_available", return_value=False):
+                    t = make_tray()
+                    try:
+                        self.assertTrue(t.start(), "托盘应当能起来（标题已降级为 ASCII）")
+                        self.assertEqual(t._icon.title, tray.ASCII_TITLE)
+                        # 菜单标签也必须能在 latin-1 后端渲染
+                        for item in t._icon.menu.items:
+                            self.assertIsInstance(item.text(None), str)
+                            self.assertTrue(item.text(None).isascii(), item.text(None))
+                    finally:
+                        t.stop()
 
     def test_localized_labels_are_kept_when_encodable(self):
         """能编码就保留本地化文案（不要为了兜底把所有界面都变英文）。"""

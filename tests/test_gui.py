@@ -547,16 +547,21 @@ class WindowTest(WindowCase):
         # 走的是真退出（quit → root.destroy），所以退出后再查窗口状态会抛 TclError
         self.assertTrue(self.window._closing, "托盘没就绪时绝不能把窗口藏起来")
 
-    def test_tray_is_disabled_on_macos(self):
-        """macOS 上 pystray 要求 run() 在主线程，而主线程被 tkinter 占着 → 宁可没有托盘，
-        也不能给一个"勾上了、图标没出现、窗口却被收走"的隐形进程（独立审查 B1）。"""
+    def test_tray_exists_on_macos_via_run_detached(self):
+        """要求"所有系统都能用"：macOS 上不能走 run()（它必须在主线程、被 tkinter 占着），
+        但 pystray 有官方替代 `run_detached()` —— 所以 macOS 上托盘是**可用**的，
+        不是"禁用 + 说明"。真正的保护在 on_close（托盘没就绪就不收窗口）。"""
         from unittest import mock
 
         from easysub_helper import tray as tray_mod
 
         with mock.patch.object(tray_mod.sys, "platform", "darwin"):
-            self.assertFalse(tray_mod.available())
-            self.assertIn("macOS", tray_mod.unavailable_reason())
+            backend = tray_mod.selected_backend()
+            # 装了 pystray 就是 pystray 后端；没装则如实不可用（并给出安装提示）
+            if backend is None:
+                self.assertIn(tray_mod.install_hint(), tray_mod.unavailable_reason())
+            else:
+                self.assertIn("pystray", backend)
 
     def test_tray_control_exists(self):
         """设置行要有「关窗最小化到托盘」勾选框；装不上 pystray 时禁用并说明原因。
@@ -607,7 +612,8 @@ class WindowTest(WindowCase):
         self.assertEqual(len(captured.output), 2, captured.output)
         self.assertTrue(captured.output[0].startswith("INFO"), captured.output)
         self.assertTrue(captured.output[1].startswith("WARNING"), captured.output)
-        self.assertIn("python3-gi", captured.output[1], "提示里要给出可执行的安装命令")
+        self.assertIn("pip install", captured.output[1], "提示里要给出可执行的安装命令")
+        self.assertIn("dbus-next", captured.output[1], "Linux 上要指向原生 SNI 那条路")
 
     def test_close_without_tray_quits(self):
         """没开托盘时，关窗仍然 = 退出（保持原有语义，不悄悄留一个后台进程）。"""
