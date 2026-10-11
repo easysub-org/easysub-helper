@@ -37,7 +37,11 @@ from .pairing import PairingManager, format_code
 LOG = logging.getLogger("easysub-helper")
 
 #: 无窗口模式：配对码过期就自动换一个并打印（用户没有「换一个」按钮可按）
-CODE_ROTATE_SEC = 15.0
+#: 无窗口模式每隔多久换一次码。
+#: 坑（opencode 审查的体验项）：以前是 15 秒 —— 用户从终端把码抄进浏览器、手慢一点就
+#: `code_expired`，而 CLI 还会不停刷「已换码」。60 秒足够抄完，仍然比 10 分钟的 TTL 收敛得多
+#: （终端里的旧码不留长期有效性）。
+CODE_ROTATE_SEC = 60.0
 
 
 # ---------------- 基础设施 ----------------
@@ -152,21 +156,6 @@ def resolve_language(argv=None):
 
 
 # ---------------- 服务 ----------------
-def _port_warning_needed(port):
-    """用了 `--port` 就该提醒吗？
-
-    坑（独立审查 M1）：助手的顺延是**相对 `--port`** 的（server 里 `self.port + i`），
-    而字幕页面只在**绝对** 8790–8810 探测。所以 `--port 8800` 看着"在范围内"，被占后却会漂到
-    8801–8820 —— 页面照样找不到。判据必须是"基础端口不是默认值"，而不是"端口本身越界"。
-    `--port 0`（随机端口）也提醒：页面同样不可能自动找到它。
-    """
-    first = config.DEFAULT_PORT
-    last = config.DEFAULT_PORT + config.PORT_SCAN_RANGE
-    if port == 0:
-        return True
-    return port < first or port + config.PORT_SCAN_RANGE > last or port != first
-
-
 def _port_warning_needed(port):
     """用了 `--port` 就该提醒吗？
 

@@ -951,7 +951,6 @@ class HelperWindow(object):
         self.devices_label.configure(text=t("gui.devicesCount",
                                            count=getattr(self, "_shown_devices", 0)))
         self.devices_button.configure(text=t("gui.devicesManage"))
-        self._shown_ttl = None          # 强制下一帧重建配对框标题（锁定提示也要跟着换语言）
         # 音源下拉的选项名也要跟着翻译（保持当前选择）
         index = self.source_box.current()
         self.source_box["values"] = [source_label(s) for s in SOURCE_ORDER]

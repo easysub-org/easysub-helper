@@ -477,7 +477,12 @@ class HelperServer(object):
             # `userOn=False + capturing=True`，真实帧与静音帧各 50fps 并存、窗口显示"已暂停"。
             # 契约是"页面 start 只是意图，绝不自己开设备"，这里就是那条契约的落点。
             if not self.user_on:
-                return False, t("server.err.paused")
+                # 返回**错误码**而不是本地化文案：调用方要据此判断"这是暂停，不是采集故障"。
+                # 坑（opencode 审查抓到的真 bug）：这里以前返回 t("server.err.paused")，
+                # 而调用方把一切失败都包成 ERR_CAPTURE_FAILED + fatal=True —— 页面侧
+                # capture_failed 不在静音清单里，于是"页面 start 等锁期间用户按了暂停"会把
+                # 整场会话连同模型一起拆掉。暂停是可恢复的意图变化，必须回 paused(非 fatal)。
+                return False, protocol.ERR_PAUSED
             # 页面 start 也是一次"意图变化"：让在飞的重启作废，否则它随后会把这里刚开的
             # 会话**覆盖**成没人 join 的孤儿（第八轮审查 S2 实测双会话 + backend 泄漏）。
             self._capture_epoch += 1
@@ -1030,9 +1035,15 @@ class HelperServer(object):
                 return
             ok, err = await self.start_capture(msg.get("source"), msg.get("device"))
             if not ok:
-                await ws.send_str(protocol.dumps(protocol.error(
-                    protocol.ERR_CAPTURE_FAILED,
-                    t("server.err.captureFailed", detail=err or ""), True)))
+                if err == protocol.ERR_PAUSED:
+                    # 排队等锁期间用户按了暂停：回可恢复的 paused（与拿锁前那条路径一致），
+                    # 页面只记一行提示、不拆会话。
+                    await ws.send_str(protocol.dumps(protocol.error(
+                        protocol.ERR_PAUSED, t("server.err.paused"), False)))
+                else:
+                    await ws.send_str(protocol.dumps(protocol.error(
+                        protocol.ERR_CAPTURE_FAILED,
+                        t("server.err.captureFailed", detail=err or ""), True)))
             return
         if mtype == protocol.CLIENT_STOP:
             # 取消订阅：设备继续由窗口总开关决定，这里只回一份当前状态

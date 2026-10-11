@@ -112,6 +112,16 @@ async def recv_text_type(ws, mtype, timeout=3.0, match=None):
     raise AssertionError("没等到 type={} 的消息".format(mtype))
 
 
+class _FakeWs(object):
+    """只记录 `send_str` 的假 WebSocket：用来断言"页面到底收到了哪一帧"。"""
+
+    def __init__(self):
+        self.sent = []
+
+    async def send_str(self, text):
+        self.sent.append(text)
+
+
 class ServerCase(unittest.TestCase):
     #: 默认关（窗口总开关的初值）——这也正是产品要求："默认关"
     USER_ON = False
@@ -527,6 +537,51 @@ class WebSocketTest(ServerCase):
             self.server._sync_silence()
             self.assertGreater(n, 5, "静音帧太少（{} 帧/0.3s）——ticker 没在跑".format(n))
             self.assertLess(n, 24, "静音帧速率异常（{} 帧/0.3s，额定 ~15）：静音 ticker 叠加了".format(n))
+
+        self.with_server(body)
+
+    def test_start_queued_behind_pause_gets_paused_not_fatal_capture_failed(self):
+        """opencode 审查 #1（真 bug）：页面 start 在**等锁期间**用户按了暂停 → 必须回
+        `paused`（非 fatal），**不能**回 `capture_failed`。
+
+        原因：`capture_failed` 不在前端的静音清单里，页面会把它当成 ERROR，连识别模型一起
+        拆掉整场会话 —— 用户看到的是"识别中"突然全停，而其实只是他按了暂停。
+        """
+        from easysub_helper.audio import BackendError
+
+        def slow_resolve(source, device):
+            time.sleep(0.3)                       # 拖住锁，让页面 start 排队
+            return device or "default-dev", None
+
+        def failing_open(source="system", backend="auto", device=None, rate=16000, frame_ms=20):
+            raise BackendError("device busy")     # 用户这次启动失败 → 总开关退回暂停
+
+        orig_resolve = helper_server.audio_devices.resolve
+        orig_create = helper_server.create_backend
+        helper_server.audio_devices.resolve = slow_resolve
+        helper_server.create_backend = failing_open
+
+        def restore():
+            helper_server.audio_devices.resolve = orig_resolve
+            helper_server.create_backend = orig_create
+
+        self.addCleanup(restore)
+
+        async def body(_session):
+            self.server.device = "USB Mic"
+            enable = asyncio.ensure_future(self.server.set_user_enabled(True))
+            await asyncio.sleep(0.1)              # 让它进到解析 await（锁被持有）
+            ws = _FakeWs()
+            start = asyncio.ensure_future(self.server._on_client_message(
+                ws, json.dumps({"type": "start", "source": "system"})))   # 页面 start 排队
+            ok, err = await enable
+            self.assertFalse(ok, "用户这次启动应当失败：%r" % (err,))
+            await start
+            self.assertTrue(ws.sent, "必须回一帧给页面")
+            payload = json.loads(ws.sent[-1])
+            self.assertEqual(payload["code"], "paused", payload)
+            self.assertFalse(payload["fatal"], payload)
+            self.assertNotEqual(payload["code"], "capture_failed", payload)
 
         self.with_server(body)
 
