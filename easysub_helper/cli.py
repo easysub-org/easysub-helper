@@ -7,7 +7,8 @@
 **采本机音频**、**和浏览器配对后把 16k PCM 推过去**。
 
 没有图形界面（Linux 缺 python3-tk，或 SSH 无 DISPLAY）时自动回落命令行：
-打印端口与配对码，然后等 Ctrl+C。无窗口模式下**默认就开始采集**——没有按钮可按，
+打印端口与配对码，然后等 Ctrl+C。无窗口模式下总开关一开始就是「启动」——没有按钮可按，
+但**设备仍要等页面发 start 才真正打开**（这行注释以前写成「默认就开始采集」，与实现不符）。
 音频由页面请求驱动（`--no-gui` 是服务器/排障用法，不是给用户用的）。
 
 语言判定顺序：`--lang` > 窗口里保存的选择 > `EASYSUB_LANG`/`LANG` > `zh_CN`。
@@ -171,75 +172,6 @@ def _port_warning_needed(port):
     return port < first or port + config.PORT_SCAN_RANGE > last or port != first
 
 
-def _pid_alive(pid):
-    """进程还在吗（跨平台，只用标准库）。"""
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        try:
-            import ctypes
-
-            SYNCHRONIZE = 0x00100000
-            handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-            if not handle:
-                return False
-            ctypes.windll.kernel32.CloseHandle(handle)
-            return True
-        except Exception:                            # noqa: BLE001
-            return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    except Exception:                                # noqa: BLE001
-        return False
-    return True
-
-
-def _lock_path():
-    return os.path.join(str(config.data_dir()), "helper.lock")
-
-
-def _read_lock():
-    """锁文件里那个实例（返回端口；文件不存在/进程已死都返回 None）。"""
-    import json as _json
-
-    try:
-        with open(_lock_path(), "r", encoding="utf-8") as handle:
-            data = _json.load(handle)
-    except Exception:                                # noqa: BLE001 - 没有文件/坏文件都算没有
-        return None
-    if not isinstance(data, dict):
-        return None
-    pid = int(data.get("pid") or 0)
-    if pid == os.getpid():
-        return None
-    if not _pid_alive(pid):
-        _clear_lock()                                # 上次没退干净留下的僵尸锁：清掉
-        return None
-    port = data.get("port")
-    return int(port) if isinstance(port, int) and port > 0 else -1
-
-
-def _write_lock(port):
-    import json as _json
-
-    try:
-        path = _lock_path()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
-            _json.dump({"pid": os.getpid(), "port": port}, handle)
-    except Exception:                                # noqa: BLE001 - 写不了锁不该拦住启动
-        pass
-
-
-def _clear_lock():
-    try:
-        os.remove(_lock_path())
-    except OSError:
-        pass
-
-
 #: HTTP 兜底探测的候选端口个数上限与超时。
 #: **有界**是硬要求：CI 的打包冒烟是"后台起服务 → sleep 3 → curl"，而 Windows 上防火墙会
 #: 把"连一个没人听的端口"变成**超时**（不是秒拒）—— 22 个端口 × 0.2s ≈ 4.4s 会把启动拖过
@@ -342,14 +274,19 @@ def build_server(args, user_on=False):
 
 
 async def _rotate_pair_code(pairing):
-    """无窗口模式：过期就换码并打印（窗口里有「换一个」按钮，命令行没有）。"""
+    """无窗口模式：**周期性换码**并打印（窗口里有「换一个」按钮，命令行没有）。
+
+    坑（独立审查 m9）：以前调的是 `ensure_code()`，而它只在码**过期**（TTL 600s）时才换 ——
+    于是 `CODE_ROTATE_SEC` 形同虚设、`log.codeRotated` 几乎永不打印，注释里"终端里的旧码
+    不留长期有效性"这条安全理由根本不成立（终端 scrollback 里泄露的码整整 10 分钟有效）。
+    这里直接用 `new_code()`：换码是明确的动作，顺带解除锁定。
+    """
     while True:
         await asyncio.sleep(CODE_ROTATE_SEC)
         before = pairing.state().get("code")
-        pairing.ensure_code()
-        after = pairing.state().get("code")
-        if after and after != before:
-            LOG.info(t("log.codeRotated", code=format_code(after)))
+        code = pairing.new_code()
+        if code and code != before:
+            LOG.info(t("log.codeRotated", code=format_code(code)))
 
 
 async def _serve(server, pairing):

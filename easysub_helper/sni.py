@@ -21,6 +21,7 @@
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import threading
@@ -227,6 +228,12 @@ def build_menu(service_interface, dbus_property, method, signal, PropertyAccess,
     return DBusMenu
 
 
+async def _maybe_await(value):
+    """`dbus-next` 的 `disconnect()` 是协程（有的版本不是）：两种都安全处理。"""
+    if inspect.isawaitable(value):
+        await value
+
+
 class SNITray(object):
     """SNI 托盘的启动/停止（跑在自己的线程里，不碰 tkinter）。
 
@@ -260,19 +267,18 @@ class SNITray(object):
         if self._actions is not None:
             self._actions.put(func)
 
-    def _label(self, key, ascii_text):
-        from .tray import latin1_safe            # SNI 走 D-Bus（UTF-8 没问题），这里只是复用降级逻辑
-
-        return latin1_safe(t(key), ascii_text)
-
     def _labels(self):
-        from .tray import ASCII_LABELS
+        """菜单文案：**不做 latin-1 降级** —— SNI 走 D-Bus，本来就是 UTF-8。
 
+        坑（独立审查 M2）：我一开始复用了 pystray 那条路的 `latin1_safe`，结果中文界面的托盘
+        菜单**永远**是英文（中文一定过不了 latin-1）；而且 toggle 项的兜底被硬编码成
+        "Start capture"，采集中也显示"启动采集"，等于告诉用户相反的状态。
+        """
+        key = "gui.trayPause" if self._is_capturing() else "gui.trayStart"
         return {
-            MENU_SHOW: self._label("gui.trayShow", ASCII_LABELS["gui.trayShow"]),
-            MENU_TOGGLE: self._label("gui.trayPause" if self._is_capturing() else "gui.trayStart",
-                                     ASCII_LABELS["gui.trayStart"]),
-            MENU_QUIT: self._label("gui.trayQuit", ASCII_LABELS["gui.trayQuit"]),
+            MENU_SHOW: t("gui.trayShow"),
+            MENU_TOGGLE: t(key),
+            MENU_QUIT: t("gui.trayQuit"),
         }
 
     # ---------- 生命周期 ----------
@@ -332,18 +338,38 @@ class SNITray(object):
         # 规范推荐的服务名（宿主看着这个名字找我们）
         await bus.request_name("org.kde.StatusNotifierItem-{}-1".format(os.getpid()))
 
+        await self._register(bus)
+        LOG.info("SNI tray registered (%s)", bus.unique_name)
+        # M3：面板/宿主（plasmashell、gnome-shell）重启后 watcher 会换新，我们的图标就没了，
+        # 而 `ready()` 若只看一次性的注册标志就会永远为真 → 用户点窗口的 × 被收进托盘后
+        # **既没窗口也没图标、服务还在跑**（本仓一路在防的隐形进程）。
+        # 周期性重新注册（幂等）即可：注册成功 → ready=True；watcher 不在 → ready=False，
+        # 于是 on_close 回落成"关窗即停服务"，不会留隐形进程。
+        self._heartbeat = asyncio.ensure_future(self._keep_registered(bus))
+
+    async def _register(self, bus):
         introspection = await bus.introspect(WATCHER_NAME, WATCHER_PATH)
         proxy = bus.get_proxy_object(WATCHER_NAME, WATCHER_PATH, introspection)
         watcher = proxy.get_interface(WATCHER_NAME)
         await watcher.call_register_status_notifier_item(bus.unique_name)
         with self._lock:
             self._ready = True
-        LOG.info("SNI tray registered (%s)", bus.unique_name)
+            self._failed = None
+
+    async def _keep_registered(self, bus):
+        while True:
+            await asyncio.sleep(10)
+            try:
+                await self._register(bus)
+            except Exception as exc:               # noqa: BLE001 - watcher 没了/总线断了
+                with self._lock:
+                    self._ready = False
+                    self._failed = str(exc)
+                LOG.warning("SNI tray lost the watcher: %s", exc)
 
     def _label_title(self):
-        from .tray import ASCII_TITLE, latin1_safe
-
-        return latin1_safe(t("gui.title"), ASCII_TITLE)
+        # 同上：D-Bus 是 UTF-8，标题直接用本地化文案
+        return t("gui.title")
 
     def _on_menu_event(self, item_id):
         if item_id == MENU_SHOW:
@@ -354,9 +380,23 @@ class SNITray(object):
             self._dispatch(self._on_quit)
 
     def refresh(self):
-        """菜单文案随状态/语言变化：换标签并通知宿主重拉布局。"""
-        menu, bus = getattr(self, "_menu", None), self._bus
-        if menu is None or bus is None:
+        """菜单文案随状态/语言变化（**线程安全**：投回 SNI 自己的 loop 执行）。
+
+        坑（独立审查 n16）：`menu`/`bus` 属于 SNI 线程里的 MessageBus，而 `refresh()` 由 Tk
+        主线程调用 —— dbus-next 的发送路径不是线程安全的，而且异常会被吞掉（表现为"切了语言
+        菜单还是旧的"）。所以这里只投递，不直接操作。
+        """
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(self._refresh_menu)
+        except Exception as exc:                       # noqa: BLE001 - loop 已关
+            LOG.debug("menu refresh skipped: %s", exc)
+
+    def _refresh_menu(self):
+        menu = getattr(self, "_menu", None)
+        if menu is None:
             return
         try:
             menu.set_labels(self._labels())
@@ -367,10 +407,19 @@ class SNITray(object):
     def stop(self):
         with self._lock:
             self._ready = False
+        heartbeat, self._heartbeat = getattr(self, "_heartbeat", None), None
+        if heartbeat is not None:
+            try:
+                heartbeat.cancel()
+            except Exception:                          # noqa: BLE001
+                pass
         loop, bus = self._loop, self._bus
         if loop is not None and bus is not None:
+            # 坑（独立审查 n17）：`MessageBus.disconnect()` 是**协程**，`call_soon_threadsafe(bus.disconnect)`
+            # 只会创建协程对象然后丢掉 → 总线从未断开、图标要等进程退出才消失。
+            # 用 ensure_future 兜住两种签名（协程/普通函数）都能正确处理。
             try:
-                loop.call_soon_threadsafe(bus.disconnect)
+                loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_maybe_await(bus.disconnect())))
             except Exception:                          # noqa: BLE001
                 pass
         if loop is not None:

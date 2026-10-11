@@ -576,6 +576,8 @@ class HelperWindow(object):
         snap = self.server.snapshot()
         self._paused = bool(snap["paused"])
         self._capturing = bool(snap["capturing"])
+        self._sync_source_from_server(snap)
+        self._refresh_tray_state()
 
         if self._boot_error:
             self._set_status(t("gui.statusFailed"), COLOR_ERR)
@@ -758,7 +760,52 @@ class HelperWindow(object):
                                text=t("gui.pausedHint") if self._paused else t("gui.waitingFrames"),
                                fill=COLOR_DIM, font=self.font_small)
 
+    def _sync_source_from_server(self, snap):
+        """页面可以带 source 发 start（协议允许），窗口下拉必须跟着改。
+
+        坑（独立审查 m8）：下拉只在建窗/用户点击/切语言时同步，于是页面把音源改成麦克风后，
+        窗口下拉还写着"系统音频"、状态行却显示"正在采集 · 麦克风" —— 同屏两个控件互相矛盾，
+        而本仓的纪律恰恰是"显示必须等于实际"。
+        """
+        if getattr(self, "_syncing_source", False):
+            return
+        actual = snap.get("source")
+        if not actual or actual == self._current_source():
+            return
+        try:
+            index = SOURCE_ORDER.index(actual)
+        except ValueError:
+            return
+        self._syncing_source = True
+        try:
+            self.source_box.current(index)
+            self._sync_device_picker(actual)
+            self._reload_devices(actual)
+            logging.getLogger("easysub-helper").info(
+                t("log.switchSource", source=source_label(actual)))
+        finally:
+            self._syncing_source = False
+
+    def _refresh_tray_state(self):
+        """托盘菜单的「启动/暂停采集」要跟着实际状态走（SNI/pystray 都靠 refresh()）。"""
+        if self._tray is None:
+            return
+        key = (self._capturing, self._paused)
+        if key == getattr(self, "_tray_state_key", None):
+            return
+        self._tray_state_key = key
+        self._tray.refresh()
+
     def _refresh_pair_code(self):
+        if self._boot_error:
+            # 服务根本没起来（例如 21 个端口都被占）：配对码是假的（页面也探不到我们），
+            # 而窗口却大字显示它 + 可点「复制」→ 与页面那句「助手没在运行」互相矛盾。
+            self.code_label.configure(text="——", font=self.font_mono)
+            self.pair_hint.configure(text=self._boot_error)
+            self.copy_button.state(["disabled"])
+            self.new_button.state(["disabled"])
+            self._shown_code = None
+            return
         if self.server.fixed_token:
             self.code_label.configure(text="--token--", font=self.font_mono_small)
             self.pair_hint.configure(text=t("gui.pairDebug"))

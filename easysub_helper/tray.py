@@ -13,11 +13,11 @@
 ## 两条硬约束（独立审查抓到的，别再踩）
 
 1. **macOS 上 pystray 的 `Icon.run()` 必须在主线程**（官方文档：OSX 后端否则会失败），
-   而我们的主线程被 tkinter 的 `mainloop()` 占着。pystray 另有一条 `run_detached()` 的路子
-   （官方 FAQ 说它"主要就是为 macOS 准备的"），但它与 Tk 主循环如何共存**我们没有验证过**，
-   所以 macOS 上先直接 `available() == False`（宁可不给托盘，也不能给一个"看着勾上了、
-   实际没图标、窗口却已经被收走"的隐形进程）。等有人在 mac 真机上验证过 `run_detached`
-   再放开这条。
+   而我们的主线程被 tkinter 的 `mainloop()` 占着。pystray 为此提供了官方的 `run_detached()`
+   （官方 FAQ 说它"主要就是为 macOS 准备的"）：在 Tk 主线程里安装图标、之后由 Tk 驱动的
+   Cocoa runloop 继续跑 —— **macOS 现在就是走这条路**（`selected_backend()`）。
+   仍未在 Mac 真机验证；万一起不来，`ready()` 不会为真，`on_close` 就会回落成"关窗即停服务"，
+   不会留下"没窗口也没图标"的隐形进程。
 2. **`start()` 返回 True 不代表图标真的起来了**：`run()` 里的异常没人接。所以用
    `run(setup=...)` 拿到"图标就绪"回调，GUI 侧再确认 `ready()` 才允许"关窗只收窗口"
    （见 gui.on_close）——托盘没就绪就绝不隐藏窗口。

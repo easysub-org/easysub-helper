@@ -311,7 +311,7 @@ jobs:
             | 平台 | 文件 | 前提 |
             |---|---|---|
             | Windows x64 | `...-windows-x64.zip`（或裸 `.exe`，双击即用） | **Win7 SP1** 起；UCRT 已内置；⚠️ Win7 档**未在真机实测**；产物**未签名**，SmartScreen 首次会拦（选"仍要运行"） |
-            | macOS | `...-macos.zip` | **系统音频需自装虚拟声卡（BlackHole）**——官方产物未内置 pysysaudio；麦克风即插即用 |
+            | macOS | `...-macos.zip` | **系统音频**：产物未内置 pysysaudio，装 **BlackHole** 这类虚拟声卡最省事（或自行 `pip install pysysaudio` 免驱，需要 macOS 14.2+）；麦克风即插即用 |
             | Linux x64 | `...-linux-x64.tar.gz` | 需要桌面环境（X11）；glibc ≥ 2.35（在 Ubuntu 22.04 上构建） |
 
             ### 用法（三步）

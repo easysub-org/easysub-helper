@@ -97,7 +97,22 @@ class SoundcardBackend(AudioBackend):
             self._com_initialized = False
 
     def open(self):
-        sc = import_soundcard()
+        try:
+            sc = import_soundcard()
+        except Exception as exc:                    # noqa: BLE001 - 缺依赖/导入失败
+            # 坑（独立审查 m7）：Linux 上 `--backend auto` 在找不到 parec/pw-record 时会**静默**
+            # 回落到 soundcard，而 soundcard 又没装时用户只看到 `No module named 'soundcard'`
+            # —— 专门写好的 audio.err.toolMissing（含 apt 安装命令）永远不出现。
+            # 这里把两条原因串起来说清楚。
+            from ..config import is_linux
+
+            if is_linux():
+                from .subprocess_backend import find_tool
+
+                if not find_tool():
+                    raise BackendError("{} / {}".format(t("audio.err.toolMissing"), exc))
+            raise
+
         self._mic = self._pick(sc)
         last_err = None
         for rate in self._rates():

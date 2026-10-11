@@ -23,6 +23,7 @@
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 import threading
@@ -248,9 +249,14 @@ class PairingManager(object):
         try:
             with open(self._store, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
-        except (IOError, OSError, ValueError):
+        except (IOError, OSError, ValueError) as exc:
+            # m5：以前静默 return —— 用户只看到"又要重新配对"，日志里连线索都没有
+            logging.getLogger("easysub-helper").warning(
+                t("log.pairingLoadFailed", path=self._store, error=exc))
             return
         if not isinstance(data, dict) or data.get("version") != STORE_VERSION:
+            logging.getLogger("easysub-helper").warning(
+                t("log.pairingVersionMismatch", path=self._store))
             return
         for item in data.get("tokens") or []:
             if isinstance(item, dict) and item.get("hash"):
@@ -315,7 +321,12 @@ class PairingManager(object):
                 # 墓碑（最多留 200 条，够用且不会无限长）
                 "forgotten": sorted(self._forgotten)[-200:],
             }
-            tmp = self._store + ".tmp"
+            # 坑（独立审查 M4）：临时名以前是固定的 `store + ".tmp"` —— 两个实例
+            # （`--allow-multi` 会明确引导用户开第二个）同时落盘会互相截断/交错，
+            # `os.replace` 可能把半截内容当成正式文件，或者一方 FileNotFoundError 被吞掉。
+            # `pairing.json` 是设备令牌的唯一持久化：坏了就"所有已配对页面全部失效"。
+            # 本仓别处（instance.py / config.py）都用了 pid 或 mkstemp，这里补齐。
+            tmp = "{}.{}.tmp".format(self._store, os.getpid())
             try:
                 directory = os.path.dirname(self._store)
                 if directory and not os.path.isdir(directory):

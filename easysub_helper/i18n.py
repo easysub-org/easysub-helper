@@ -43,7 +43,7 @@ _STRINGS = {
 
         # ---- 命令行（排障/服务器）----
         "cli.help.lang": "界面语言（{langs}）",
-        "cli.help.nogui": "不弹窗口，用纯命令行模式（服务器/排障；此模式下默认就开始采集）",
+        "cli.help.nogui": "不弹窗口，用纯命令行模式（服务器/排障）。注意：此模式下总开关一开始就是「启动」，但设备仍要等页面发 start 才打开",
         "cli.help.port": "监听端口（默认 {default}；被占用时从它向后顺延 20 个）。注意：字幕页面只自动探测 {default}–{last}，所以别改这个默认值（改成别的基础端口后顺延会越过 {last}，页面就找不到助手了；真改了的话在页面离线框里手动填端口）",
         "cli.help.allowmulti": "允许同时运行多个助手实例（默认拒绝：两个实例各有各的配对码，还会互相覆盖已配对设备）",
         "cli.warn.portOutOfRange": "⚠ 用了 --port {port}：助手被占用时会从 {port} 起向后顺延，可能落到字幕页面探测不到的端口（页面只自动探测 {first}–{last}）。除非你在页面离线框里手动填端口，否则请去掉 --port（默认值本来就会自动顺延）。",
@@ -137,7 +137,7 @@ _STRINGS = {
         "gui.pausedHint": "已暂停 —— 点「启动」开始采集（不需要配对）",
         "gui.quit": "退出",
         "gui.logLabel": "日志",
-        "gui.keepOpen": "关窗即结束服务（勾选「最小化到托盘」可让服务继续跑）；「暂停」只停采集，连接不断。",
+        "gui.keepOpen": "默认勾了「关闭窗口时最小化到托盘」：关窗只收窗口、服务继续；取消勾选后关窗才会结束服务。「暂停」只停采集，连接不断。",
         "gui.licenseSource": "AGPL-3.0-or-later · 源代码",
         "gui.clients": "已连接页面：{count}",
         "gui.errNoTk": "没有可用的图形界面（缺少 tkinter 或无显示环境），已回落到命令行模式。Linux 上装 tkinter：sudo apt install python3-tk（Debian/Ubuntu）、sudo dnf install python3-tkinter（Fedora）。",
@@ -145,6 +145,8 @@ _STRINGS = {
         # ---- 日志（会显示在窗口日志区，也要 i18n）----
         "log.listening": "正在监听 {url}",
         "log.pairFailed": "配对失败：{reason}（Origin={origin}）",
+        "log.pairingLoadFailed": "配对库读取失败（{path}）：{error}；本次按「没有已配对设备」继续",
+        "log.pairingVersionMismatch": "配对库版本/结构不符（{path}）：按「没有已配对设备」继续",
         "log.pairOk": "配对成功：{label}（已配对设备 {devices}）",
         "log.stopFailed": "停止采集异常：{error}",
         "log.captureFailed": "采集故障：{error}",
@@ -235,7 +237,7 @@ _STRINGS = {
 
         # ---- 命令行（排障/服务器）----
         "cli.help.lang": "UI language ({langs})",
-        "cli.help.nogui": "no window: plain command line (servers/debugging; capture starts immediately)",
+        "cli.help.nogui": "no window: plain command line (servers/debugging). Note: the capture switch starts as ON, but the device is only opened when a page sends start",
         "cli.help.port": "listen port (default {default}; walks forward up to 20 ports when busy). Note: the subtitle page auto-probes {default}-{last} only, so leave the default alone (with any other base port the walk can pass {last} and the page will not find the helper; if you do change it, type the port in the page dialog)",
         "cli.help.allowmulti": "allow several helper instances at once (refused by default: each instance has its own pair code and they overwrite each other's paired devices)",
         "cli.warn.portOutOfRange": "⚠ --port {port} was given: when busy the helper walks forward from {port}, which can land on a port the subtitle page does not auto-probe (it probes {first}-{last}). Unless you type the port manually in the page dialog, drop --port (the default already walks forward).",
@@ -329,7 +331,7 @@ _STRINGS = {
         "gui.pausedHint": "paused — press Start to capture (no pairing needed)",
         "gui.quit": "Quit",
         "gui.logLabel": "Log",
-        "gui.keepOpen": "Closing stops the service (tick \"minimize to tray\" to keep it running); Pause only stops capture, the connection stays.",
+        "gui.keepOpen": "Minimize-to-tray is on by default: closing only hides the window and keeps the service running; untick it to make closing stop the service. Pause only stops capture, the connection stays.",
         "gui.licenseSource": "AGPL-3.0-or-later · source code",
         "gui.clients": "pages connected: {count}",
         "gui.errNoTk": "no usable GUI (tkinter missing or no display); falling back to the command line. On Linux install tkinter: sudo apt install python3-tk (Debian/Ubuntu), sudo dnf install python3-tkinter (Fedora).",
@@ -337,6 +339,8 @@ _STRINGS = {
         # ---- 日志（会显示在窗口日志区，也要 i18n）----
         "log.listening": "listening on {url}",
         "log.pairFailed": "pairing failed: {reason} (origin={origin})",
+        "log.pairingLoadFailed": "cannot read the pairing store ({path}): {error}; continuing with no paired devices",
+        "log.pairingVersionMismatch": "pairing store version/shape mismatch ({path}): continuing with no paired devices",
         "log.pairOk": "paired: {label} ({devices} devices)",
         "log.stopFailed": "error while stopping capture: {error}",
         "log.captureFailed": "capture failed: {error}",

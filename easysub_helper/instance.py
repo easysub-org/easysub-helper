@@ -70,6 +70,18 @@ def pid_alive(pid):
     return True
 
 
+def _remove_if_unchanged(raw):
+    """只有当锁文件内容仍是 `raw` 时才删（避免误删别人刚写进去的锁）。"""
+    try:
+        with open(lock_path(), "r", encoding="utf-8") as handle:
+            if handle.read() != raw:
+                return False
+        os.remove(lock_path())
+        return True
+    except OSError:
+        return False
+
+
 def read():
     """锁里那个实例的端口（没有/是自己/进程已死 → None）。
 
@@ -77,7 +89,8 @@ def read():
     """
     try:
         with open(lock_path(), "r", encoding="utf-8") as handle:
-            data = json.load(handle)
+            raw = handle.read()
+        data = json.loads(raw)
     except Exception:                                # noqa: BLE001 - 没有文件/坏文件都算没有
         return None
     if not isinstance(data, dict):
@@ -89,7 +102,10 @@ def read():
     if pid == os.getpid():
         return None
     if not pid_alive(pid):
-        release(force=True)                          # 上次没退干净留下的僵尸锁：顺手清掉
+        # 僵尸锁顺手清掉 —— 但**只在内容没变时**删：读到"pid 已死"到 unlink 之间，别的实例
+        # 可能已经重写了这把锁，无条件删就会把**活实例**的锁删掉（第三个实例于是畅通无阻）。
+        # 独立审查 m6。
+        _remove_if_unchanged(raw)
         return None
     try:
         port = int(data.get("port") or 0)
@@ -104,10 +120,21 @@ def _disabled():
 
 
 def claim(port=None):
-    """在绑定**之前**占位（见模块开头的 TOCTOU 说明）。"""
+    """在绑定**之前**占位（见模块开头的 TOCTOU 说明）。
+
+    坑（独立审查 m6）：以前无条件写 —— `--allow-multi`（或并发 `--selftest`）会把**别人活着的**
+    锁改写成自己的 pid；第二个实例退出时会删掉这把锁，第三个实例于是看不到"已有实例"，
+    两个实例各自持码却写同一份 pairing.json（模块开头声称要拦的那件事）。
+    现在：锁里是**别人且还活着**就不覆盖（返回 False；调用方只记日志，不拦启动）。
+    """
     if _disabled():
-        return
+        return False
+    existing = read()
+    if existing and not _is_ours():
+        LOG.warning("instance lock is held by another live helper; not overwriting it")
+        return False
     _write(port)
+    return True
 
 
 def update(port):

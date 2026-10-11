@@ -59,6 +59,21 @@ def _running_loop():
     return asyncio.get_event_loop()
 
 
+def error_text(err):
+    """把**控制流错误码**翻成当前语言的人话（已经是人话的原样返回）。
+
+    约定（别再混用，混用出过真 bug）：`_open_locked` 这类内部方法对"状态不允许"返回
+    **协议码**（`protocol.ERR_*`），对"真正的失败"返回已经可读的原因；**展示层**（WS 帧、
+    窗口红字、日志）统一用这个函数翻译。
+    踩过的坑：暂停被当成致命采集故障 —— `_open_locked` 返回本地化文案，而 WS 分发按
+    `err == protocol.ERR_PAUSED` 比较，字符串对不上 → 页面收到 `capture_failed, fatal=True`
+    并拆掉整场会话。
+    """
+    if err == protocol.ERR_PAUSED:
+        return t("server.err.paused")
+    return err or ""
+
+
 def _clean_label(value, default):
     """把配对请求里的 `label` 收拾成一行短字符串。
 
@@ -350,7 +365,7 @@ class HelperServer(object):
         只回最小信息（无令牌、无设备名、无路径）。`paired` 表示**本次请求带的令牌**是否有效，
         因此页面一次调用就能判断"有没有助手 + 我配过没有"。
         """
-        state = self.pairing.state() if self.pairing is not None else {"valid": False, "devices": 0}
+        # 不再算一份没人用的 state（它只是白拿一次锁）
         return self._json(request, {
             "ok": True,
             "app": "easysub-helper",
@@ -447,7 +462,7 @@ class HelperServer(object):
                 if not ok:
                     # 打不开就退回暂停：窗口不能显示"正在采集"却没有设备
                     self.user_on = False
-                    failure = err
+                    failure = error_text(err)        # 对外是"人话"，内部才是码（见 error_text）
             else:
                 session = self._detach_locked()
         # 坑（第八轮审查）：**失败路径也必须 join** —— 以前 open 失败时提前 return，
@@ -515,7 +530,8 @@ class HelperServer(object):
         # `userOn=False + capturing=True` 粘住、真实帧与静音帧各 50fps 并存，窗口却显示
         # "已暂停"（并发审计 H5 确定性复现）。把不变量收在锁内，一处兜住所有入口。
         if self._shutting_down or not self.user_on:
-            return False, t("server.err.paused")
+            # 返回**协议码**：调用方要据此判断"这是暂停/正在关闭，不是采集故障"（见 error_text）。
+            return False, protocol.ERR_PAUSED
         # 意图快照（并发审计 F4）：await 之后**不再重读 `self.*`**。以前是"await 前写
         # `_capture_source`、await 后读它"，于是设备可能按旧音源解析出来，却配给新音源用
         # （实测 `create_backend(source='mic', device='alsa_output…monitor')`：以为在采麦克风，
@@ -536,7 +552,9 @@ class HelperServer(object):
         # 或用户点了暂停 —— 开头那次复查在 await 之前，不够。实测 `stop()` 恰好落在这段解析里时
         # 设备仍会被真开一次（终态自洽、无泄漏，但没必要真去碰一次麦克风）。这里再复查一次。
         if self._shutting_down or not self.user_on:
-            return False, t("server.err.paused")
+            # 同上：慢解析期间用户暂停/开始关闭 → 这是可恢复的状态变化，不是采集故障。
+            # （这条路径**可达**：`stop()` 不持锁就翻转 _shutting_down/user_on。）
+            return False, protocol.ERR_PAUSED
         try:
             backend = create_backend(
                 source=capture_source,
@@ -663,7 +681,7 @@ class HelperServer(object):
             ok, error = await self._open_locked()
         if not ok:
             await self._recover_after_failed_restart()
-        return ok, error
+        return ok, error_text(error)             # 调用方（切换音源/设备）直接展示它
 
     async def _recover_after_failed_restart(self):
         """重启采集失败后的收敛：与 `_finish_capture_error_on_loop` 同一套契约。

@@ -69,12 +69,16 @@ class InstanceTest(unittest.TestCase):
             self.assertIsNone(instance.read(), payload)
 
     def test_release_only_removes_our_own_lock(self):
-        # 别人（活着的实例）的锁：绝不能删
+        # 别人（活着的实例）的锁：既不能覆盖（复审 m6），也不能删（复审 M3）
         self._write_raw({"pid": os.getpid() + 1, "port": 9000})
-        instance.release()
-        self.assertTrue(os.path.exists(instance.lock_path()), "不能删别人的锁（复审 M3）")
-        # 自己的锁：删
-        instance.claim(8790)
+        with mock.patch.object(instance, "pid_alive", return_value=True):
+            self.assertFalse(instance.claim(8790), "不得覆盖别人的活锁")
+            self.assertTrue(os.path.exists(instance.lock_path()))
+            instance.release()
+            self.assertTrue(os.path.exists(instance.lock_path()), "不能删别人的锁")
+        # 自己的锁：写进去之后能删
+        os.remove(instance.lock_path())
+        self.assertTrue(instance.claim(8790))
         instance.release()
         self.assertFalse(os.path.exists(instance.lock_path()))
 
