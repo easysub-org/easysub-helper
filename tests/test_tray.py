@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 
 from easysub_helper import tray
+from easysub_helper.i18n import t
 
 
 class FakeIcon(object):
@@ -98,6 +99,101 @@ class TrayReadinessTest(unittest.TestCase):
         with mock.patch.object(tray.sys, "platform", "linux"):
             with mock.patch.object(tray, "available", return_value=False):
                 self.assertIn(tray.install_hint(), tray.unavailable_reason())
+
+
+class FakeMenuItem(object):
+    def __init__(self, text, action, default=False):
+        self.text = text
+        self.action = action
+        self.default = default
+
+
+class FakeMenu(object):
+    def __init__(self, *items):
+        self.items = items
+
+
+class FakePystrayIcon(object):
+    def __init__(self, name, image, title, menu):
+        # pystray 的 X11 后端会在这里（或渲染时）用 latin-1 编码标题；中文直接抛
+        title.encode("latin-1")
+        self.name = name
+        self.title = title
+        self.menu = menu
+        self.visible = False
+
+    def run(self, setup=None):
+        if setup is not None:
+            setup(self)
+
+    def stop(self):
+        self.visible = False
+
+    def update_menu(self):
+        pass
+
+
+class FakeImage(object):
+    @staticmethod
+    def open(path):
+        return object()
+
+
+class FakePystray(object):
+    MenuItem = FakeMenuItem
+    Menu = FakeMenu
+    Icon = FakePystrayIcon
+
+
+def _fake_modules():
+    import types
+    pystray_mod = types.ModuleType("pystray")
+    for attr in ("MenuItem", "Menu", "Icon"):
+        setattr(pystray_mod, attr, getattr(FakePystray, attr))
+    pil_mod = types.ModuleType("PIL")
+    image_mod = types.ModuleType("PIL.Image")
+    image_mod.open = FakeImage.open
+    return {"pystray": pystray_mod, "PIL": pil_mod, "PIL.Image": image_mod}
+
+
+class TrayEncodingTest(unittest.TestCase):
+    """用户实测的 bug：中文标题在 X11 后端抛 latin-1 编码错误 → 托盘根本起不来。
+
+    现在：本地化文案过不了编码就退回 ASCII（能起来比好看重要），并且说清楚原因。
+    """
+
+    def test_latin1_safe_helper(self):
+
+        self.assertEqual(tray.latin1_safe("OK", "fallback"), "OK")
+        self.assertEqual(tray.latin1_safe(t("gui.title"), tray.ASCII_TITLE), tray.ASCII_TITLE)
+        self.assertTrue(tray.latin1_safe(t("gui.title"), tray.ASCII_TITLE).isascii())
+
+    def test_start_passes_a_latin1_encodable_title(self):
+        import sys as _sys
+
+        with mock.patch.dict(_sys.modules, _fake_modules()):
+            with mock.patch.object(tray, "available", return_value=True):
+                t = make_tray()
+                try:
+                    self.assertTrue(t.start(), "托盘应当能起来（标题已降级为 ASCII）")
+                    self.assertEqual(t._icon.title, tray.ASCII_TITLE)
+                    # 菜单标签也必须能在 latin-1 后端渲染
+                    for item in t._icon.menu.items:
+                        self.assertIsInstance(item.text(None), str)
+                        self.assertTrue(item.text(None).isascii(), item.text(None))
+                finally:
+                    t.stop()
+
+    def test_localized_labels_are_kept_when_encodable(self):
+        """能编码就保留本地化文案（不要为了兜底把所有界面都变英文）。"""
+        tray_obj = make_tray()
+        with mock.patch.object(tray, "latin1_safe", side_effect=lambda text, fallback: text):
+            self.assertEqual(tray_obj._label("gui.trayShow"), t("gui.trayShow"))
+
+    def test_ascii_fallback_is_used_on_a_latin1_backend(self):
+        tray_obj = make_tray()
+        self.assertEqual(tray_obj._label("gui.trayQuit"), tray.ASCII_LABELS["gui.trayQuit"])
+        self.assertEqual(tray_obj._label("gui.trayShow"), tray.ASCII_LABELS["gui.trayShow"])
 
 
 if __name__ == "__main__":

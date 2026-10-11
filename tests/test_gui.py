@@ -559,18 +559,22 @@ class WindowTest(WindowCase):
             self.assertIn("macOS", tray_mod.unavailable_reason())
 
     def test_tray_control_exists(self):
-        """设置行要有「关窗最小化到托盘」勾选框；装不上 pystray 时禁用并说明原因。"""
+        """设置行要有「关窗最小化到托盘」勾选框；装不上 pystray 时禁用并说明原因。
+
+        坑（复审 + 用户环境实测）：这条断言以前写死"必须 disabled"，等于依赖"本机没装 pystray"
+        —— pystray 一装上（用户就是这样）测试就假红。现在按**实际可用性**断言契约：
+        「不可用 ⇒ 禁用且有原因；可用 ⇒ 不禁用」。
+        """
+        from easysub_helper import tray as tray_mod
         from easysub_helper.i18n import t
 
         self.assertEqual(self.window.tray_box.cget("text"), t("gui.minimizeToTray"))
-        # 本环境没装 pystray → 托盘勾选框必须**禁用**并给出原因，而不是点了没反应
-        from unittest import mock
-
-        from easysub_helper import gui as gui_mod
-
-        with mock.patch.object(gui_mod.tray, "available", return_value=False):
-            self.assertFalse(gui_mod.tray.available())
-        self.assertIn("disabled", str(self.window.tray_box.state()))
+        state = str(self.window.tray_box.state())
+        if tray_mod.available():
+            self.assertNotIn("disabled", state)
+        else:
+            self.assertIn("disabled", state)
+            self.assertTrue(self.window.tray_hint.cget("text"), "不可用时必须说明原因")
 
     def test_close_without_tray_quits(self):
         """没开托盘时，关窗仍然 = 退出（保持原有语义，不悄悄留一个后台进程）。"""

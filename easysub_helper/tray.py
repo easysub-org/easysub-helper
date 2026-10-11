@@ -31,6 +31,26 @@ from .i18n import t
 
 LOG = logging.getLogger("easysub-helper")
 
+#: 托盘后端的编码兜底：X11/Xlib 那条路**只吃 latin-1**，中文标题会直接抛
+#: `UnicodeEncodeError: 'latin-1' codec can't encode characters in position 0-6`
+#: （用户实测：托盘因此根本起不来）。能起来比好看重要，所以本地化文案过不了编码就退回 ASCII。
+ASCII_TITLE = "EasySub Helper"
+ASCII_LABELS = {
+    "gui.trayShow": "Show window",
+    "gui.trayStart": "Start capture",
+    "gui.trayPause": "Pause capture",
+    "gui.trayQuit": "Quit",
+}
+
+
+def latin1_safe(text, fallback):
+    """后端只吃 latin-1 时退回 fallback（其它编码错误也一并兜住）。"""
+    try:
+        text.encode("latin-1")
+        return text
+    except (UnicodeEncodeError, AttributeError, TypeError):
+        return fallback
+
 
 def available():
     """托盘能不能用（pystray + Pillow + **本平台允许**才算）。"""
@@ -105,6 +125,10 @@ class Tray(object):
             self._actions.put(func)
 
     # ---------------- 生命周期 ----------------
+    def _label(self, key):
+        """菜单/标题文案：本地化优先，编码不过就退回 ASCII（见 ASCII_LABELS 的说明）。"""
+        return latin1_safe(t(key), ASCII_LABELS.get(key, key))
+
     def start(self):
         if not available() or self._icon is not None:
             return False
@@ -114,15 +138,20 @@ class Tray(object):
 
             image = Image.open(self._icon_path)
             menu = pystray.Menu(
-                pystray.MenuItem(lambda _i: t("gui.trayShow"),
+                pystray.MenuItem(lambda _i: self._label("gui.trayShow"),
                                  lambda *_: self.post(self._on_show), default=True),
-                pystray.MenuItem(lambda _i: t("gui.trayPause") if self._is_capturing()
-                                 else t("gui.trayStart"),
+                pystray.MenuItem(lambda _i: self._label("gui.trayPause") if self._is_capturing()
+                                 else self._label("gui.trayStart"),
                                  lambda *_: self.post(self._on_toggle)),
-                pystray.MenuItem(lambda _i: t("gui.trayQuit"),
+                pystray.MenuItem(lambda _i: self._label("gui.trayQuit"),
                                  lambda *_: self.post(self._on_quit)),
             )
-            self._icon = pystray.Icon("easysub-helper", image, t("gui.title"), menu)
+            # 标题也必须过编码：中文标题在 X11 后端会直接抛（用户实测）
+            title = latin1_safe(t("gui.title"), ASCII_TITLE)
+            if title != t("gui.title"):
+                # 说清楚为什么托盘菜单是英文：免得用户以为翻译坏了（用户实测报了这条）
+                LOG.info("tray backend only accepts latin-1: falling back to ASCII labels")
+            self._icon = pystray.Icon("easysub-helper", image, title, menu)
         except Exception as exc:                    # noqa: BLE001 - 托盘失败不该影响主功能
             LOG.warning("tray unavailable: %s", exc)
             self._icon = None

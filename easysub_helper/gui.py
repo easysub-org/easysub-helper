@@ -1126,7 +1126,8 @@ class HelperWindow(object):
         self._tray.stop()
         self._tray = None
         self.tray_var.set(False)
-        config.set_setting("minimize_to_tray", False)
+        # 不写配置：失败只影响**本次会话**。若在这里写 False，用户升级/装好后还得手动再勾一次
+        # （用户实测：托盘因编码问题起不来一次，偏好就被写掉了）。
         # 真实原因（而不是"缺 pystray"——用户明明装着）：复审 m2
         self._show_tray_hint(t("gui.trayStartFailed", error=reason))
         logging.getLogger("easysub-helper").warning(t("log.trayFailed", error=reason))
