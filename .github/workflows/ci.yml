@@ -54,6 +54,11 @@ jobs:
         run: |
           python -m pip install --upgrade "pip<24" setuptools wheel
           python -m pip install -e ".${{ matrix.extras }}"
+          # 托盘依赖：**CI 也要真的跑托盘相关代码**。
+          # 坑（用户实测）：以前测试作业不装它们 → tests/test_sni.py 与托盘的 GUI 用例永远 skipped，
+          # 于是"中文标题在 latin-1 后端抛异常"和"右键菜单参数不匹配"这两个 bug 都是用户先撞到的。
+          # pystray 在 Linux 上会自带 python-xlib；dbus-next 是纯 Python。
+          python -m pip install "pystray>=0.19" "pillow>=9" "dbus-next>=0.2.3" "python-xlib>=0.33"
       - name: Unit tests（无需音频设备）
         shell: bash
         run: python -m unittest discover -s tests -t . -v
@@ -87,7 +92,7 @@ jobs:
           # macOS 的 onefile+windowed 在 PyInstaller 6.x 已弃用（v7 会报错），先钉在 6.x；
           # 真要迁 onedir/.app 需要一并改产物路径与冒烟（见 README「未实测」清单）。
           python -m pip install "pyinstaller>=6.0,<7"
-          python -m pip install -e ".[capture]" "pystray>=0.19" "pillow>=9" "dbus-next>=0.2.3"
+          python -m pip install -e ".[capture]" "pystray>=0.19" "pillow>=9" "dbus-next>=0.2.3" "python-xlib>=0.33"
       - name: 把 Release 版本号打进源码（__version__ / pyproject）
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
         run: python tools/stamp_version.py "${{ github.event.inputs.version }}"
@@ -150,7 +155,7 @@ jobs:
           python -m pip install "pyinstaller>=6.0,<7"
           # 刻意不带 `quality`：soxr 是 LGPL-2.1-or-later，塞进 PyInstaller 单文件会让
           # "用户可替换该库"这条义务落空。重采样有内置 polyphase FIR 兜底，音质差别很小。
-          python -m pip install -e ".[capture]" "pystray>=0.19" "pillow>=9" "dbus-next>=0.2.3"
+          python -m pip install -e ".[capture]" "pystray>=0.19" "pillow>=9" "dbus-next>=0.2.3" "python-xlib>=0.33"
           # macOS 图标用 assets/easysub.icns（同样来自插件 logo）；
           # 想要系统音频免驱动，再加 extras: pysysaudio（macOS 14.2+）
           # --windowed：默认入口是 tkinter 窗口，不能带控制台
@@ -206,7 +211,7 @@ jobs:
           # Windows 7 or newer, but we only officially support Windows 8+"）；Win7 档固定在
           # 仍把 Win7 当受支持平台的 5.13.2，少一个变量。
           python -m pip install "pyinstaller==5.13.2"
-          python -m pip install -e ".[capture]" "pystray>=0.19" "pillow>=9" "dbus-next>=0.2.3"
+          python -m pip install -e ".[capture]" "pystray>=0.19" "pillow>=9" "dbus-next>=0.2.3" "python-xlib>=0.33"
           # 打包脚本负责：① 用静态入口 launcher.py；② 把 UCRT（api-ms-win-crt-*.dll +
           # ucrtbase.dll）打进 onefile（Win7 SP1 未打补丁时系统里没有它们）；
           # ③ 打完后校验这些 DLL 真的在归档里，缺了就红 —— 我们没有 Win7 真机，
