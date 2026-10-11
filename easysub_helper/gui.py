@@ -1120,7 +1120,12 @@ class HelperWindow(object):
         if self._tray is None:
             return
         if self._tray.ready():
-            logging.getLogger("easysub-helper").info(t("log.trayReady"))
+            log = logging.getLogger("easysub-helper")
+            log.info(t("log.trayReady"))
+            note = tray.compatibility_note()
+            if note:
+                # 起来了也未必看得见（后端与桌面协议不匹配）—— 提前把可执行建议放进日志区
+                log.warning(note)
             return
         reason = self._tray.failed() or "not ready"
         self._tray.stop()

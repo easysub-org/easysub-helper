@@ -576,6 +576,39 @@ class WindowTest(WindowCase):
             self.assertIn("disabled", state)
             self.assertTrue(self.window.tray_hint.cget("text"), "不可用时必须说明原因")
 
+    def test_verify_tray_runs_the_real_compatibility_check(self):
+        """托盘就绪后那条路径**必须真的走一遍** tray.compatibility_note()。
+
+        坑（用户实测）：`compatibility_note()` 里忘了 `import os`，而它只在这条路径上被调用
+        —— 启动看起来完全正常（"托盘已就绪"），随后 Tk 回调里抛 NameError。只测 tray 模块
+        自己的函数不会发现"调用点没走通"，所以这里在窗口里真跑一遍。
+        """
+        import os as _os
+        from unittest import mock
+
+        from easysub_helper import tray as tray_mod
+
+        class ReadyTray(object):
+            def ready(self):
+                return True
+
+            def failed(self):
+                return None
+
+            def stop(self):
+                pass
+
+        self.window._tray = ReadyTray()
+        with mock.patch.object(tray_mod, "backend_name", return_value="pystray._xorg"):
+            with mock.patch.dict(_os.environ, {"XDG_CURRENT_DESKTOP": "UKUI"}, clear=False):
+                with self.assertLogs("easysub-helper", level="INFO") as captured:
+                    self.window._verify_tray()          # 不能抛
+        # 两条日志：①"托盘已就绪" ②后端与桌面协议不匹配的**可执行建议**（含安装命令）
+        self.assertEqual(len(captured.output), 2, captured.output)
+        self.assertTrue(captured.output[0].startswith("INFO"), captured.output)
+        self.assertTrue(captured.output[1].startswith("WARNING"), captured.output)
+        self.assertIn("python3-gi", captured.output[1], "提示里要给出可执行的安装命令")
+
     def test_close_without_tray_quits(self):
         """没开托盘时，关窗仍然 = 退出（保持原有语义，不悄悄留一个后台进程）。"""
         self.window._tray = None

@@ -24,6 +24,7 @@
 """
 
 import logging
+import os
 import sys
 import threading
 
@@ -63,6 +64,36 @@ def available():
     except Exception:                               # noqa: BLE001
         return False
     return True
+
+
+def backend_name():
+    """当前 pystray 选中的后端（`pystray._xorg` 等）；拿不到返回 None。
+
+    这条信息很关键（用户实测排查）：Linux 上 pystray 会因为**缺 PyGObject** 而退到旧的
+    XEmbed 后端，而 KDE/UKUI/GNOME 这些桌面走的是 StatusNotifier 协议 —— 后端与桌面协议
+    不匹配时，表现就是"托盘里没有图标、点什么都没反应"。
+    """
+    try:
+        import pystray
+
+        return pystray.Icon.__module__
+    except Exception:                                # noqa: BLE001
+        return None
+
+
+def compatibility_note():
+    """后端与桌面协议可能不匹配时，给一条**可执行**的建议；没问题就返回 None。"""
+    if not sys.platform.startswith("linux"):
+        return None
+    name = backend_name() or ""
+    if not name.endswith("_xorg"):
+        return None
+    desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or
+               os.environ.get("DESKTOP_SESSION") or "").lower()
+    if not any(key in desktop for key in ("kde", "ukui", "lxqt", "deepin", "gnome")):
+        return None
+    return t("gui.trayXorgHint", desktop=os.environ.get("XDG_CURRENT_DESKTOP")
+             or os.environ.get("DESKTOP_SESSION") or "?")
 
 
 def unavailable_reason():
@@ -156,6 +187,7 @@ class Tray(object):
             LOG.warning("tray unavailable: %s", exc)
             self._icon = None
             return False
+        LOG.info("tray backend: %s", backend_name())
         self._thread = threading.Thread(target=self._run, name="easysub-helper-tray")
         self._thread.daemon = True
         self._thread.start()

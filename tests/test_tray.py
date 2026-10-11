@@ -156,6 +156,47 @@ def _fake_modules():
     return {"pystray": pystray_mod, "PIL": pil_mod, "PIL.Image": image_mod}
 
 
+class TrayModuleSmokeTest(unittest.TestCase):
+    """把 tray 模块的公开函数都真的调一遍。
+
+    坑（用户实测）：`compatibility_note()` 里忘了 `import os` —— 只在"托盘就绪后"那条路径上
+    被调用，于是启动看起来一切正常，随后 Tk 回调里抛 `NameError`。纯读码/只测别的函数都发现不了，
+    所以这里逐个调用。
+    """
+
+    def test_public_helpers_are_callable(self):
+        self.assertIsInstance(tray.install_hint(), str)
+        self.assertTrue(tray.install_hint())
+        self.assertIsInstance(tray.available(), bool)
+        # 后端名可能为 None（没装 pystray），但调用不能抛
+        backend = tray.backend_name()
+        self.assertTrue(backend is None or isinstance(backend, str))
+
+    def test_compatibility_note_variants(self):
+        with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "UKUI"}, clear=False):
+            tray.compatibility_note()            # 不能抛
+        with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "XFCE"}, clear=False):
+            tray.compatibility_note()
+        with mock.patch.object(tray.sys, "platform", "win32"):
+            self.assertIsNone(tray.compatibility_note())
+
+    def test_compatibility_note_flags_xorg_on_sni_desktops(self):
+        with mock.patch.object(tray, "backend_name", return_value="pystray._xorg"):
+            with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "UKUI"}, clear=False):
+                note = tray.compatibility_note()
+                self.assertIsNotNone(note)
+                self.assertIn("UKUI", note)
+            with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "XFCE"}, clear=False):
+                self.assertIsNone(tray.compatibility_note(), "XFCE 用 XEmbed，不需要提示")
+
+    def test_unavailable_reason_variants(self):
+        with mock.patch.object(tray.sys, "platform", "darwin"):
+            self.assertIn("macOS", tray.unavailable_reason())
+        with mock.patch.object(tray.sys, "platform", "linux"):
+            with mock.patch.object(tray, "available", return_value=False):
+                self.assertIn(tray.install_hint(), tray.unavailable_reason())
+
+
 class TrayEncodingTest(unittest.TestCase):
     """用户实测的 bug：中文标题在 X11 后端抛 latin-1 编码错误 → 托盘根本起不来。
 
