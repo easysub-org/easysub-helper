@@ -145,6 +145,7 @@ _STRINGS = {
         # ---- 日志（会显示在窗口日志区，也要 i18n）----
         "log.listening": "正在监听 {url}",
         "log.pairFailed": "配对失败：{reason}（Origin={origin}）",
+        "log.guiUnavailable": "图形界面起不来（{error}）：改走命令行模式，服务照常提供",
         "log.pairingLoadFailed": "配对库读取失败（{path}）：{error}；本次按「没有已配对设备」继续",
         "log.pairingVersionMismatch": "配对库版本/结构不符（{path}）：按「没有已配对设备」继续",
         "log.pairOk": "配对成功：{label}（已配对设备 {devices}）",
@@ -339,6 +340,7 @@ _STRINGS = {
         # ---- 日志（会显示在窗口日志区，也要 i18n）----
         "log.listening": "listening on {url}",
         "log.pairFailed": "pairing failed: {reason} (origin={origin})",
+        "log.guiUnavailable": "cannot start the window ({error}): falling back to command line, the service keeps running",
         "log.pairingLoadFailed": "cannot read the pairing store ({path}): {error}; continuing with no paired devices",
         "log.pairingVersionMismatch": "pairing store version/shape mismatch ({path}): continuing with no paired devices",
         "log.pairOk": "paired: {label} ({devices} devices)",

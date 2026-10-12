@@ -138,10 +138,20 @@ def claim(port=None):
 
 
 def update(port):
-    """绑定成功后把真实端口写进去（`--port 0` 时端口是系统给的）。"""
+    """绑定成功后把真实端口写进去（`--port 0` 时端口是系统给的）。
+
+    坑（两份独立审查都抓到，M2/P2）：以前无条件写 —— 第二个实例（`--allow-multi`、GUI 弹窗
+    选「继续开第二个」、或并发跑 `--selftest`）虽然 `claim()` 没抢到锁，绑定成功后仍会把锁
+    改写成自己的 pid；它退出时 `release()` 认为锁是自己的，于是**删掉第一个还活着的实例的锁**，
+    第三个实例畅通无阻 → 两个实例各持配对码却共写 `pairing.json`（锁文件存在的全部理由）。
+    """
     if _disabled():
-        return
+        return False
+    if read() and not _is_ours():
+        LOG.warning("instance lock belongs to another live helper; not overwriting it")
+        return False
     _write(port)
+    return True
 
 
 def release(force=False):

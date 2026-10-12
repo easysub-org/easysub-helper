@@ -1268,10 +1268,22 @@ class HelperWindow(object):
 
 
 def run(server, pairing):
-    """起窗口并阻塞到用户退出；返回 None 表示"没有可用图形界面，请回落命令行"。"""
+    """起窗口并阻塞到用户退出；返回 None 表示"没有可用图形界面，请回落命令行"。
+
+    坑（独立审查 H1）：`tkinter_module()` 只查环境变量。它判定"有显示环境"之后，`Tk()` 仍可能
+    抛（纯 Wayland 会话只设了 WAYLAND_DISPLAY、SSH 转发的 X 已断、`Can't find a usable
+    init.tcl`）。以前这层异常谁都不接 → 进程打 traceback 退出；打包成 `--windowed` 时 stderr
+    是黑洞（cli.py 把它换成 devnull），用户看到的就是"双击毫无反应"。
+    这里兜住并**回落命令行**（文档一直承诺的 fallback）。注意不能只 `pass` ——
+    那会变成"没有窗口也没有服务"。
+    """
     if tkinter_module() is None:
         return None
-    window = HelperWindow(server, pairing)
+    try:
+        window = HelperWindow(server, pairing)
+    except Exception as exc:                       # noqa: BLE001 - TclError / 显示器不可用
+        logging.getLogger("easysub-helper").warning(t("log.guiUnavailable", error=exc))
+        return None
     window._start_tray_if_wanted()      # 上次勾过"关窗最小化到托盘"就自动拉起
     return window.mainloop()
 

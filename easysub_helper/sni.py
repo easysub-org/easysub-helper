@@ -222,7 +222,11 @@ def build_menu(service_interface, dbus_property, method, signal, PropertyAccess,
             return [[], []]
 
         @signal()
-        def LayoutUpdated(self, revision: "u", parent: "i"):
+        def LayoutUpdated(self, revision: "u", parent: "i") -> "ui":
+            # 坑（独立审查 M1，静默失效）：dbus-next 的 @signal() **只认返回注解**当信号签名。
+            # 不写返回注解 → 签名是 0 个参数，而这里 body 返回两个 → SignatureBodyMismatchError，
+            # 被上层 except 吞掉（默认 INFO 级别下用户什么都看不见）→ 托盘菜单文案永远停在
+            # 创建时那一版：切语言不更新、采集状态也不更新（"启动采集"实际会暂停正在跑的采集）。
             return [revision, parent]
 
     return DBusMenu

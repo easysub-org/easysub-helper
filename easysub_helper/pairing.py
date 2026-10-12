@@ -239,6 +239,10 @@ class PairingManager(object):
         with self._lock:
             count = len(self._tokens)
             self._forgot_all = True
+            # 墓碑（独立审查 M3/P5）：以前只置内存标志、不写墓碑 —— 另一个活实例的并集落盘
+            # 会把这些令牌**写回**磁盘，用户「全部解绑」过一会儿设备又回来了、那个页面还能连。
+            self._forgotten |= set(self._tokens.keys())
+            self._forgotten = set(sorted(self._forgotten)[-200:])
             self._tokens = {}
         if self.persist:
             self._save()
@@ -273,6 +277,19 @@ class PairingManager(object):
     def _save(self):
         with self._save_lock:                       # 见 __init__: _save_lock 的说明
             return self._save_unlocked()
+
+    def _load_forgotten(self):
+        """只读磁盘上的解绑墓碑（坏文件/缺字段一律当空集，绝不抛）。"""
+        try:
+            with open(self._store, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (IOError, OSError, ValueError):
+            return set()
+        except Exception:                           # noqa: BLE001 - 兜底：落盘路径不该因读失败而崩
+            return set()
+        if not isinstance(data, dict):
+            return set()
+        return {d for d in (data.get("forgotten") or []) if isinstance(d, str) and d}
 
     def _merged_tokens(self):
         """内存里的设备表 + 磁盘上的（并集）—— 两个实例共用一份 pairing.json 时别互相抹掉。
@@ -312,6 +329,13 @@ class PairingManager(object):
         return tokens
 
     def _save_unlocked(self):
+            # 墓碑取"本实例 ∪ 磁盘"（独立审查 M3）：只写自己那份的话，另一个活实例解绑时
+            # 落盘的墓碑会被本次保存**抹掉**，而它内存里还记得那条令牌 → 下次并集保存
+            # 就把已解绑的设备写回来了（用户看到"解绑过一会儿又回来"）。顺便并回本实例，
+            # 让后续合并也认这些墓碑。
+            on_disk = self._load_forgotten()
+            forgotten = set(self._forgotten) | on_disk
+            self._forgotten |= on_disk
             data = {
                 "version": STORE_VERSION,
                 "tokens": [
@@ -319,7 +343,7 @@ class PairingManager(object):
                     for h, v in self._merged_tokens().items()
                 ],
                 # 墓碑（最多留 200 条，够用且不会无限长）
-                "forgotten": sorted(self._forgotten)[-200:],
+                "forgotten": sorted(forgotten)[-200:],
             }
             # 坑（独立审查 M4）：临时名以前是固定的 `store + ".tmp"` —— 两个实例
             # （`--allow-multi` 会明确引导用户开第二个）同时落盘会互相截断/交错，
