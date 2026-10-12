@@ -411,22 +411,25 @@ def main(argv=None):
 
     has_gui = (not args.no_gui) and _gui_module.available()
     running = _find_running_helper(args.port, fast=not has_gui)
+    # 坑（复核 L）：锁文件刚被 claim()、还没 update() 时端口是"未知"（read() 返回 True），
+    # 直接插进文案会变成「已经有一个助手在运行（端口 True）」。用一句人话代替。
+    port_text = running if isinstance(running, int) else t("cli.portUnknown")
     if running:
         if args.allow_multi:
-            _eprint(t("cli.warn.multiInstance", port=running))
+            _eprint(t("cli.warn.multiInstance", port=port_text))
         else:
             # 窗口化打包（Windows --noconsole / macOS --windowed）下 stderr 是黑洞：
             # 只 _eprint 会让用户以为"双击没反应"（独立审查 B2）。有 GUI 就弹窗让用户选。
             # 只有真的有图形界面时才弹窗 —— `--no-gui`（脚本/服务用法）绝不弹模态窗，
             # 否则命令行/无人值守场景会被一个没人点的对话框挂住（复审 M4）。
-            answer = _ask_keep_second_instance(running) if has_gui else None
+            answer = _ask_keep_second_instance(port_text) if has_gui else None
             if not answer:
-                _eprint(t("cli.err.multiInstance", port=running))
+                _eprint(t("cli.err.multiInstance", port=port_text))
                 logging.getLogger("easysub-helper").warning(
-                    t("cli.err.multiInstance", port=running))
+                    t("cli.err.multiInstance", port=port_text))
                 return 2
             logging.getLogger("easysub-helper").warning(
-                t("cli.warn.multiInstance", port=running))
+                t("cli.warn.multiInstance", port=port_text))
 
     from . import gui
 
@@ -441,7 +444,12 @@ def main(argv=None):
         code = gui.run(server, pairing)
         if code is not None:
             return code
-        # 窗口没能起来（极小概率）：退回落模式，总开关得打开，否则页面永远拿不到音频
+        # 窗口没能起来（极小概率）：退回落模式，总开关得打开，否则页面永远拿不到音频。
+        # **必须给可见提示**（独立复核 P1-a）：这条路径正是"GUI 起不来"时唯一的存在理由，
+        # 而 `gui.errNoTk` 在上面的 elif 分支里、恰好被跳过；`--windowed` 打包下 stderr 是
+        # devnull，什么都不说就变成"看不见、也退不掉"的常驻服务（第二次双击还会静默 return 2）。
+        _eprint(t("gui.errWindowUnavailable"))
+        logging.getLogger("easysub-helper").warning(t("gui.errWindowUnavailable"))
         server.user_on = True
     elif not args.no_gui:
         _eprint(t("gui.errNoTk"))

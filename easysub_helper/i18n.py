@@ -141,6 +141,9 @@ _STRINGS = {
         "gui.licenseSource": "AGPL-3.0-or-later · 源代码",
         "gui.clients": "已连接页面：{count}",
         "gui.errNoTk": "没有可用的图形界面（缺少 tkinter 或无显示环境），已回落到命令行模式。Linux 上装 tkinter：sudo apt install python3-tk（Debian/Ubuntu）、sudo dnf install python3-tkinter（Fedora）。",
+        "gui.errWindowUnavailable": "窗口没能起来（有显示环境但 Tk 构造失败，例如纯 Wayland 会话或 X 转发已断），已回落到命令行模式：服务照常在本机提供音频，按 Ctrl+C 退出。",
+        "log.instanceLockHeld": "另一个助手实例正持有单实例锁：本次不覆盖它（多实例会共写 pairing.json，导致「刚配对好又要重配」）",
+        "cli.portUnknown": "未知",
 
         # ---- 日志（会显示在窗口日志区，也要 i18n）----
         "log.listening": "正在监听 {url}",
@@ -336,6 +339,9 @@ _STRINGS = {
         "gui.licenseSource": "AGPL-3.0-or-later · source code",
         "gui.clients": "pages connected: {count}",
         "gui.errNoTk": "no usable GUI (tkinter missing or no display); falling back to the command line. On Linux install tkinter: sudo apt install python3-tk (Debian/Ubuntu), sudo dnf install python3-tkinter (Fedora).",
+        "gui.errWindowUnavailable": "the window could not start (a display exists but Tk failed to initialise - e.g. a Wayland-only session or a dead X forward); falling back to the command line: the service keeps providing audio on this machine, press Ctrl+C to quit.",
+        "log.instanceLockHeld": "another helper instance holds the single-instance lock: not overwriting it (several instances share pairing.json, which shows up as \"it asks me to pair again after a while\")",
+        "cli.portUnknown": "unknown",
 
         # ---- 日志（会显示在窗口日志区，也要 i18n）----
         "log.listening": "listening on {url}",

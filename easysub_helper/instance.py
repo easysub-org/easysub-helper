@@ -26,6 +26,7 @@ import logging
 import os
 
 from . import config
+from .i18n import t
 
 LOG = logging.getLogger("easysub-helper")
 
@@ -131,7 +132,7 @@ def claim(port=None):
         return False
     existing = read()
     if existing and not _is_ours():
-        LOG.warning("instance lock is held by another live helper; not overwriting it")
+        LOG.warning(t("log.instanceLockHeld"))
         return False
     _write(port)
     return True
@@ -148,7 +149,7 @@ def update(port):
     if _disabled():
         return False
     if read() and not _is_ours():
-        LOG.warning("instance lock belongs to another live helper; not overwriting it")
+        LOG.warning(t("log.instanceLockHeld"))
         return False
     _write(port)
     return True

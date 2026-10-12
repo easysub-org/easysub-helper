@@ -274,6 +274,18 @@ class PairingManager(object):
             if isinstance(digest, str) and digest:
                 self._forgotten.add(digest)
 
+    def _load_disk_hashes(self):
+        """只读磁盘上的设备令牌 hash 集合（坏文件/缺字段当空集，绝不抛）。"""
+        try:
+            with open(self._store, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:                           # noqa: BLE001 - 读不到就当没有
+            return set()
+        if not isinstance(data, dict):
+            return set()
+        return {item.get("hash") for item in (data.get("tokens") or [])
+                if isinstance(item, dict) and item.get("hash")}
+
     def _save(self):
         with self._save_lock:                       # 见 __init__: _save_lock 的说明
             return self._save_unlocked()
@@ -335,7 +347,13 @@ class PairingManager(object):
             # 让后续合并也认这些墓碑。
             on_disk = self._load_forgotten()
             forgotten = set(self._forgotten) | on_disk
-            self._forgotten |= on_disk
+            if self._forgot_all:
+                # 「全部解绑」= 这台机器上所有设备作废，**包括另一个实例刚配对、本实例内存里
+                # 还不知道**的那些（它们此刻只存在于磁盘上）。只把 tokens 写空是不够的：
+                # 对方下一次并集保存会把它们原样写回来，用户看到"解绑过一会儿又回来"，
+                # 而 forget_all() 还报告"已解绑 0 个"（独立复核 P4-a）。
+                forgotten |= self._load_disk_hashes()
+            self._forgotten |= forgotten
             data = {
                 "version": STORE_VERSION,
                 "tokens": [

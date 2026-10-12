@@ -406,27 +406,44 @@ class SNITray(object):
             menu.set_labels(self._labels())
             menu.LayoutUpdated(menu._revision, 0)
         except Exception as exc:                       # noqa: BLE001 - 刷新失败不该影响主功能
-            LOG.debug("menu refresh failed: %s", exc)
+            # 以前这条是 DEBUG：而"信号签名写错"这种问题正是这样被静默吞掉、让托盘菜单
+            # 永远停在旧状态的（独立审查 M1 + 复核要求提到 WARNING）。刷新失败是可见缺陷，
+            # 必须留痕，但仍不中断主功能。
+            LOG.warning("menu refresh failed: %s", exc)
 
     def stop(self):
         with self._lock:
             self._ready = False
         heartbeat, self._heartbeat = getattr(self, "_heartbeat", None), None
+        loop = self._loop
         if heartbeat is not None:
+            # 坑（复核 L）：本模块其它地方一律经 call_soon_threadsafe 投回 SNI 的 loop，
+            # 只有这里从 Tk 线程直接 Task.cancel() —— 那个入口不是线程安全的。
             try:
-                heartbeat.cancel()
+                if loop is not None:
+                    loop.call_soon_threadsafe(heartbeat.cancel)
+                else:
+                    heartbeat.cancel()
             except Exception:                          # noqa: BLE001
                 pass
         loop, bus = self._loop, self._bus
         if loop is not None and bus is not None:
-            # 坑（独立审查 n17）：`MessageBus.disconnect()` 是**协程**，`call_soon_threadsafe(bus.disconnect)`
-            # 只会创建协程对象然后丢掉 → 总线从未断开、图标要等进程退出才消失。
-            # 用 ensure_future 兜住两种签名（协程/普通函数）都能正确处理。
+            # 坑（独立审查 n17 + 复核 N1）：`MessageBus.disconnect()` 是**协程**；而且断开与
+            # `loop.stop()` 必须**串在同一个协程里** —— 先投 ensure_future 再投 stop 的话，
+            # run_forever 处理完当前 ready 批次就退出，新 task 的 step 排在后面、永远轮不到，
+            # 结果 disconnect 从未被 await（图标一直挂到进程退出、点了没反应）。
+            async def _shutdown():
+                try:
+                    await _maybe_await(bus.disconnect())
+                except Exception:                      # noqa: BLE001 - 关不掉也得把 loop 停掉
+                    pass
+                loop.stop()
+
             try:
-                loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_maybe_await(bus.disconnect())))
+                loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_shutdown()))
             except Exception:                          # noqa: BLE001
                 pass
-        if loop is not None:
+        elif loop is not None:
             try:
                 loop.call_soon_threadsafe(loop.stop)
             except Exception:                          # noqa: BLE001

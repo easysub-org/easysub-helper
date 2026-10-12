@@ -1284,7 +1284,13 @@ def run(server, pairing):
     except Exception as exc:                       # noqa: BLE001 - TclError / 显示器不可用
         logging.getLogger("easysub-helper").warning(t("log.guiUnavailable", error=exc))
         return None
-    window._start_tray_if_wanted()      # 上次勾过"关窗最小化到托盘"就自动拉起
+    # 托盘启动**单独兜**（复核 P1-b）：它在原位置在 try 之外，一旦抛异常就越过上面那层回落
+    # 直接崩掉 main() —— 没窗口、没服务、锁也不 release。但托盘失败也不该把窗口带走，
+    # 所以这里只记一条 `log.trayFailed`（gui 内部还会取消勾选），继续 mainloop。
+    try:
+        window._start_tray_if_wanted()  # 上次勾过"关窗最小化到托盘"就自动拉起
+    except Exception as exc:                       # noqa: BLE001
+        logging.getLogger("easysub-helper").warning(t("log.trayFailed", error=exc))
     return window.mainloop()
 
 
