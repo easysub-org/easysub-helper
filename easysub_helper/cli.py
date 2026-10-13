@@ -200,6 +200,49 @@ def _probe_helper_port(port):
         return False
 
 
+def _gui_failure_notice(server, pairing):
+    """GUI 起不来时的**唯一可见通道**（盲审 S1，major）。
+
+    `--windowed`/`--noconsole` 打包产物里 stdout/stderr 被换成 devnull（见 `_stream()`），
+    而托盘也由窗口拉起 —— 于是一条 `_eprint` 之后就变成"没窗口、没控制台、配对码只存在内存里、
+    没有任何 UI 能退出"的常驻服务：用户双击毫无反应，页面却要他输入永远看不到的 6 位码
+    （第二次双击还会被告知"已经有一个助手在运行（端口未知）"）。
+    这里给两条**不依赖 stdout/tkinter** 的通道：① 端口 + 配对码写进固定文件；
+    ② 尽力弹一个原生错误框（Windows MessageBox / macOS osascript / Linux zenity）。
+    """
+    port = getattr(server, "port", None) or config.DEFAULT_PORT
+    try:
+        code = pairing.ensure_code()
+    except Exception:                       # noqa: BLE001 - 拿不到码也要给端口
+        code = None
+    path = os.path.join(config.data_dir(), "last-run.txt")
+    text = t("cli.guiFallbackNotice", port=port, code=code or "?", path=path)
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+    except Exception:                       # noqa: BLE001 - 写不进去就只靠弹框
+        pass
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(None, text, "EasySub Helper", 0x10)
+        elif sys.platform == "darwin":
+            import subprocess
+
+            subprocess.Popen(["osascript", "-e",
+                              'display alert "EasySub Helper" message "%s"' % text.replace('"', "'")])
+        else:
+            import shutil as _sh
+            import subprocess
+
+            if _sh.which("zenity"):
+                subprocess.Popen(["zenity", "--error", "--text=" + text])
+    except Exception:                       # noqa: BLE001 - 没有任何图形通道也不能崩
+        pass
+    return path
+
+
 def _find_running_helper(preferred_port=None, fast=False):
     """本机是不是已经有助手在跑？返回它的端口（未知时返回 True），没有则 None。
 
@@ -492,9 +535,11 @@ def main(argv=None):
         # devnull，什么都不说就变成"看不见、也退不掉"的常驻服务（第二次双击还会静默 return 2）。
         _eprint(t("gui.errWindowUnavailable"))
         logging.getLogger("easysub-helper").warning(t("gui.errWindowUnavailable"))
+        _gui_failure_notice(server, pairing)   # 盲审 S1：给一条不依赖 stdout/tkinter 的可见通道
         server.user_on = True
     elif not args.no_gui:
         _eprint(t("gui.errNoTk"))
+        _gui_failure_notice(server, pairing)
 
     try:
         return run_async(_serve(server, pairing), cleanup=cleanup)
