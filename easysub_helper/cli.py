@@ -180,6 +180,9 @@ _PROBE_FALLBACK_TIMEOUT = 0.1
 #: GUI 起不来时我们已把配对码写进 `last-run.txt`（唯一可见通道）——此时**不要再 60 秒换码**，
 #: 否则用户拿到的码转眼作废、输错 5 次还被锁 300 秒，而窗口化产物里旋转日志也进了 devnull（盲审 A）。
 _SKIP_CODE_ROTATION = False
+#: 锁文件"新鲜期"内一律当活实例：探不到不能证明它不存在（--host 网卡 / 正在启动 / 0.1s 超时），
+#: 只有比这更旧的锁才允许按陈旧锁放行（盲审第 7 轮的 major 修正）。
+_STALE_LOCK_GRACE_SEC = 120
 _PROBE_FALLBACK_BUDGET = 0.5
 
 
@@ -278,15 +281,11 @@ def _find_running_helper(preferred_port=None, fast=False):
         # isinstance 会掉进下面拿 `int(True)=1` 去探活的坑，于"端口未知的锁"被误判成陈旧锁
         # → 放行第二个实例（两套配对码共写 pairing.json，正是单实例锁存在的全部理由）。
         if known is True:
-            # 盲审 B（major）：port 未知的锁以前**直接当真**（无法证伪）—— pid 被复用/僵尸时
-            # 用户被永久拦在"已经有一个助手在运行（端口未知）"外面（--no-gui 直接 return 2，
-            # 文案还让他去找一个并不存在的窗口）。这里用兜底探测证伪：默认端口段里真有助手
-            # 应答（校验 app）才认，否则按陈旧锁继续启动。
-            for candidate in range(config.DEFAULT_PORT, config.DEFAULT_PORT + 3):
-                if _probe_helper_port(candidate):
-                    return candidate
-            logging.getLogger("easysub-helper").warning(t("cli.warn.staleLock", port="?"))
-            return None
+            # 盲审（major，我上轮改错了方向）：port 未知的锁**必须当成活实例** ——
+            # 这个状态正是"第 1 个实例已 claim 但还没 bind"的窗口（打包产物建窗约 3 秒，
+            # 期间用户看不到任何窗口、最容易再双击）。上一轮我用探活去"证伪"，结果这段窗口里
+            # 探不到 → 静默放行第二个实例（两套码共写 pairing.json，正是护栏要拦的事）。
+            return True
         if not isinstance(known, int):
             return True
         # 盲审 S2（major）：**端口才是事实**。锁里的 pid 可能已被复用（Windows pid 复用很快）
@@ -294,6 +293,18 @@ def _find_running_helper(preferred_port=None, fast=False):
         # GUI 弹"要以另一个实例继续吗"并把用户引向"两个实例共写 pairing.json"（正是护栏要避免的）。
         # 这里对锁里的端口做一次**有界**探活：探不通就当陈旧锁（不删，交给 claim/update 覆盖）。
         if _probe_helper_port(known):
+            return known
+        # 盲审（major）：**"探不到"不等于"不存在"** —— `--host <网卡IP> --allow-lan` 只绑网卡，
+        # 探 127.0.0.1 必然失败；刚启动还没 bind 的实例同理；繁忙机器上 0.1s 超时也会误判。
+        # 所以探活只能**正向确认**；判陈旧必须另有证据：**锁文件够旧**（说明不是刚刚在启动）。
+        # （instance.py 原本就写明"不用 HTTP 探测是因为 --port 9000/--host <网卡> 根本探不到"。）
+        try:
+            import time as _t
+
+            age = _t.time() - os.path.getmtime(instance.lock_path())
+        except Exception:                                    # noqa: BLE001 - 取不到年龄就当旧
+            age = 1e9
+        if age < _STALE_LOCK_GRACE_SEC:
             return known
         logging.getLogger("easysub-helper").warning(
             t("cli.warn.staleLock", port=known))
