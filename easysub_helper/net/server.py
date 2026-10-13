@@ -714,7 +714,13 @@ class HelperServer(object):
         # 实测"设备切换在飞时点音源"会把用户最后一次切换静默收敛成暂停+报错。
         async with self._get_lock():
             self._intent_seq += 1
-            if source != self.default_source:
+            # 判据必须是**实际在用的音源**（`_capture_source`），不能是"窗口上次选的"
+            # （`default_source`）—— 盲审 S1（major）：页面可以带 source 发 start 改写
+            # `_capture_source` 而 `default_source` 不变，于是"页面改成 mic → 用户在窗口选了
+            # 麦克风设备 A → 用户把窗口切回系统音频"时 `source == default_source` 成立而不清 A
+            # → 之后每次启动都拿 A 去解析 system 源 →「找不到设备 A」→ 会话被 fatal 拆掉；
+            # 而 system 音源下设备下拉是**隐藏**的，用户在窗口里没有清除入口。
+            if source != self._capture_source:
                 self.device = None
             self.default_source = source
             # 坑（全盲审查实测的 major）：**非采集态也要同步 `_capture_source`**。它一旦采集过就
