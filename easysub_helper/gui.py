@@ -795,9 +795,26 @@ class HelperWindow(object):
             self._syncing_source = False
 
     def _refresh_tray_state(self):
-        """托盘菜单的「启动/暂停采集」要跟着实际状态走（SNI/pystray 都靠 refresh()）。"""
+        """托盘菜单的「启动/暂停采集」要跟着实际状态走（SNI/pystray 都靠 refresh()）。
+
+        另外这里兼一个**看门狗**（盲审 M1，major）：窗口**已经收进托盘之后**托盘再失效
+        （SNI 心跳注册一直失败、桌面面板重启、macOS "注册成功但图标没画出来"）→ 没有窗口、
+        没有图标、也没有控制台（--windowed 下 stderr 是黑洞），进程却还在跑、还在采音频、
+        还占着端口，用户只能去任务管理器杀。`on_close` 只在**关窗那一刻**查 `ready()`，
+        之后没人再看 —— 所以在这里补：想用托盘 + 窗口已隐藏 + `ready()` 变假 → 把窗口收回来
+        （并取消勾选、记一条日志），用户至少能看见它并正常退出。
+        """
         if self._tray is None:
             return
+        try:
+            hidden = self.root.state() == "withdrawn"
+        except Exception:                           # noqa: BLE001 - 取不到状态就当没隐藏
+            hidden = False
+        if hidden and bool(self.tray_var.get()) and not self._tray.ready():
+            logging.getLogger("easysub-helper").warning(t("log.trayLostShownBack"))
+            self.tray_var.set(False)
+            config.set_setting("minimize_to_tray", False)
+            self.root.deiconify()
         key = (self._capturing, self._paused)
         if key == getattr(self, "_tray_state_key", None):
             return
