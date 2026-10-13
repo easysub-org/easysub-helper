@@ -561,16 +561,24 @@ class HelperWindow(object):
         if self._closing:
             return
         try:
-            self._refresh()
-        except Exception as exc:  # noqa: BLE001 - 刷新出错也不能把界面弄死
+            try:
+                self._refresh()
+            except Exception as exc:  # noqa: BLE001 - 刷新出错也不能把界面弄死
+                logging.getLogger("easysub-helper").debug(t("log.guiRefreshFailed", error=exc))
+            self._refresh_log()
+            self._drain_device_results()
+            self._drain_tray_actions()
+            if self._device_reload_pending:
+                self._device_reload_pending = False
+                self._reload_devices()
+        except Exception as exc:  # noqa: BLE001 - 任何一步出错都不该让窗口停止更新
             logging.getLogger("easysub-helper").debug(t("log.guiRefreshFailed", error=exc))
-        self._refresh_log()
-        self._drain_device_results()
-        self._drain_tray_actions()
-        if self._device_reload_pending:
-            self._device_reload_pending = False
-            self._reload_devices()
-        self._schedule_poll()
+        finally:
+            # 坑（盲审 B3）：重排必须在 finally。以前只有 `_refresh()` 被 try 包住，
+            # 其余几个裸奔调用任一抛异常，`_schedule_poll()` 就再也不执行 —— 状态行、电平图、
+            # 配对码倒计时、日志区、托盘状态**永久冻结**，而服务仍在跑（窗口与现实不一致），
+            # 窗口化产物 stderr 是黑洞，连 traceback 都看不到。
+            self._schedule_poll()
 
     def _refresh(self):
         snap = self.server.snapshot()

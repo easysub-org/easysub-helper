@@ -59,7 +59,10 @@ class PysysaudioCapture(object):
             except BackendError:
                 raise
             except Exception as exc:  # noqa: BLE001 - 老版本没有该方法时忽略
-                LOG.debug(t("log.pysysaudioPermCheck"), exc)
+                # 坑（盲审 B2，一行确定性 bug）：`t()` 返回 `{}` 模板，按 `%` 风格传参会让
+                # logging 抛 `TypeError: not all arguments converted` —— GUI 日志区把这条
+                # 直接吞掉（macOS 回退/未授权的原因永远看不到），终端里则是 Logging error。
+                LOG.debug(t("log.pysysaudioPermCheck", error=exc))
         try:
             self._rec = checker(sample_rate=self.rate, channels=1, format="numpy", dtype="float32")
             self._rec.start_recording()          # 只要流，不落文件
@@ -113,7 +116,9 @@ class MacSystemBackend(AudioBackend):
                 return
             except Exception as exc:  # noqa: BLE001 - 回落是设计的一部分
                 self._fallback_error = exc
-                LOG.info(t("log.pysysaudioFallback"), exc)
+                # 同上（盲审 B2）：这一条正是文档里的主回退路径，格式化写错会让用户永远
+                # 看不到"为什么回退到虚拟声卡"。
+                LOG.info(t("log.pysysaudioFallback", error=exc))
         inner = SoundcardBackend(source=self.source, device=self.device, rate=self.rate,
                                  frame_ms=self.frame_ms)
         try:

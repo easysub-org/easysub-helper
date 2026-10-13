@@ -1059,6 +1059,16 @@ class HelperServer(object):
                     await ws.send_str(protocol.dumps(protocol.error(
                         protocol.ERR_PAUSED, t("server.err.paused"), False)))
                 else:
+                    # 坑（盲审 B1，中）：**页面发起的 start 失败**以前不改总开关、不接静音、
+                    # 也不广播 state —— 于是停在 `paused=false + capturing=false` 的自相矛盾态：
+                    # 页面/`/api/pair/info`/`hello` 都说"未暂停"，实际没有会话，而且
+                    # `_sync_silence` 的 want 需要 `not user_on`，连静音帧都不推 → 页面一帧都
+                    # 收不到（`--no-gui` 或 GUI 回落 CLI 时 user_on 初值就是 True，最易命中）。
+                    # 这里镜像窗口路径（`set_user_enabled` 失败分支）与 `_recover_after_failed_restart`：
+                    # 退回暂停 + 推静音 + 广播 state，让页面至少保持"暂停、静音、可恢复"。
+                    self.user_on = False
+                    self._sync_silence()
+                    self._broadcast(("json", self._state_msg()))
                     await ws.send_str(protocol.dumps(protocol.error(
                         protocol.ERR_CAPTURE_FAILED,
                         t("server.err.captureFailed", detail=err or ""), True)))
