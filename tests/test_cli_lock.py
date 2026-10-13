@@ -45,13 +45,34 @@ class FindRunningHelperTest(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def test_lock_file_wins_over_network(self):
-        """锁文件优先：它瞬时、精确，也不受 http_proxy 影响。"""
+        """锁文件优先：它瞬时、精确，也不受 http_proxy 影响。
+
+        但（盲审 S2）**端口要活着才算数**：pid 会被复用、也可能是僵尸，只信 pid 会把用户
+        永久拦在"已经有一个助手在运行"外面。所以这里 mock 探活为真（锁有效），
+        另加一条"探不通即视为陈旧锁"的用例。
+        """
         path = instance.lock_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write('{"pid": %d, "port": 9000}' % (os.getpid() + 1))
-        with mock.patch.object(instance, "pid_alive", return_value=True):
+        with mock.patch.object(instance, "pid_alive", return_value=True), \
+             mock.patch.object(cli, "_probe_helper_port", return_value=True):
             self.assertEqual(cli._find_running_helper(), 9000)
+        # 陈旧锁（端口没人监听）→ 不再拦启动
+        with mock.patch.object(instance, "pid_alive", return_value=True), \
+             mock.patch.object(cli, "_probe_helper_port", return_value=False):
+            self.assertIsNone(cli._find_running_helper())
+
+
+    def test_stale_lock_with_reused_pid_does_not_block_startup(self):
+        """pid 复用/僵尸导致的假"已有实例"必须被端口探活识破（否则 --no-gui 直接 return 2）。"""
+        path = instance.lock_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write('{"pid": %d, "port": 9001}' % (os.getpid() + 1))
+        with mock.patch.object(instance, "pid_alive", return_value=True), \
+             mock.patch.object(cli, "_probe_helper_port", return_value=False):
+            self.assertIsNone(cli._find_running_helper())
 
     def test_fast_path_never_touches_the_network(self):
         """命令行/无窗口路径必须**零延迟**：CI 的打包冒烟只给 3 秒（见文件头说明）。"""

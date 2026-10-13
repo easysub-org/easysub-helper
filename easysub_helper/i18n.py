@@ -144,6 +144,7 @@ _STRINGS = {
         "gui.errWindowUnavailable": "窗口没能起来（有显示环境但 Tk 构造失败，例如纯 Wayland 会话或 X 转发已断），已回落到命令行模式：服务照常在本机提供音频，按 Ctrl+C 退出。",
         "log.instanceLockHeld": "另一个助手实例正持有单实例锁：本次不覆盖它（多实例会共写 pairing.json，导致「刚配对好又要重配」）",
         "cli.portUnknown": "未知",
+        "cli.warn.staleLock": "发现陈旧的单实例锁（端口 {port} 上并没有助手在跑）：按没有实例继续启动",
 
         # ---- 日志（会显示在窗口日志区，也要 i18n）----
         "log.listening": "正在监听 {url}",
@@ -342,6 +343,7 @@ _STRINGS = {
         "gui.errWindowUnavailable": "the window could not start (a display exists but Tk failed to initialise - e.g. a Wayland-only session or a dead X forward); falling back to the command line: the service keeps providing audio on this machine, press Ctrl+C to quit.",
         "log.instanceLockHeld": "another helper instance holds the single-instance lock: not overwriting it (several instances share pairing.json, which shows up as \"it asks me to pair again after a while\")",
         "cli.portUnknown": "unknown",
+        "cli.warn.staleLock": "found a stale single-instance lock (no helper is listening on port {port}): starting as if none were running",
 
         # ---- 日志（会显示在窗口日志区，也要 i18n）----
         "log.listening": "listening on {url}",

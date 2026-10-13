@@ -180,6 +180,23 @@ _PROBE_FALLBACK_TIMEOUT = 0.1
 _PROBE_FALLBACK_BUDGET = 0.5
 
 
+def _probe_helper_port(port):
+    """**有界**地探一下 `127.0.0.1:<port>/api/pair/info`：有助手在监听才算真。
+
+    盲审 S2 用它区分"锁里的 pid 活着"与"助手真在跑" —— pid 会被复用、也可能是僵尸，
+    只信 pid 会把用户永久拦在"已经有一个助手在运行"外面。只用锁里已有的端口，不做端口扫描。
+    """
+    import urllib.request as _url
+
+    try:
+        opener = _url.build_opener(_url.ProxyHandler({}))   # 别让 http_proxy 把本机探测代理走
+        with opener.open("http://127.0.0.1:{}/api/pair/info".format(int(port)),
+                         timeout=_PROBE_FALLBACK_TIMEOUT) as resp:
+            return 200 <= int(getattr(resp, "status", 200) or 200) < 500
+    except Exception:                                        # noqa: BLE001 - 探不通就是陈旧锁
+        return False
+
+
 def _find_running_helper(preferred_port=None, fast=False):
     """本机是不是已经有助手在跑？返回它的端口（未知时返回 True），没有则 None。
 
@@ -194,7 +211,17 @@ def _find_running_helper(preferred_port=None, fast=False):
     known = instance.read()
     if known:
         # 端口未知时 instance.read() 返回 True —— 让调用方照样能提示"已有实例"
-        return known if isinstance(known, int) else True
+        if not isinstance(known, int):
+            return True
+        # 盲审 S2（major）：**端口才是事实**。锁里的 pid 可能已被复用（Windows pid 复用很快）
+        # 或是未被回收的僵尸 → `read()` 仍报"存活"，于是 `--no-gui` 直接 return 2 起不来、
+        # GUI 弹"要以另一个实例继续吗"并把用户引向"两个实例共写 pairing.json"（正是护栏要避免的）。
+        # 这里对锁里的端口做一次**有界**探活：探不通就当陈旧锁（不删，交给 claim/update 覆盖）。
+        if _probe_helper_port(known):
+            return known
+        logging.getLogger("easysub-helper").warning(
+            t("cli.warn.staleLock", port=known))
+        return None
     if fast:
         # 零延迟路径（命令行/无窗口，含 CI 的打包冒烟）：只认锁文件。
         # 坑（真踩过，helper-ci 38066370590）：冒烟是"后台起服务 → sleep 3 → curl"，而 onefile
