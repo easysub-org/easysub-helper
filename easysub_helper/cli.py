@@ -177,6 +177,9 @@ def _port_warning_needed(port):
 #: 把"连一个没人听的端口"变成**超时**（不是秒拒）—— 22 个端口 × 0.2s ≈ 4.4s 会把启动拖过
 #: 那 3 秒，冒烟直接红（真实踩过：helper-ci 38064062965 / 38065887519）。
 _PROBE_FALLBACK_TIMEOUT = 0.1
+#: GUI 起不来时我们已把配对码写进 `last-run.txt`（唯一可见通道）——此时**不要再 60 秒换码**，
+#: 否则用户拿到的码转眼作废、输错 5 次还被锁 300 秒，而窗口化产物里旋转日志也进了 devnull（盲审 A）。
+_SKIP_CODE_ROTATION = False
 _PROBE_FALLBACK_BUDGET = 0.5
 
 
@@ -195,7 +198,17 @@ def _probe_helper_port(port):
         opener = _url.build_opener(_url.ProxyHandler({}))   # 别让 http_proxy 把本机探测代理走
         with opener.open("http://127.0.0.1:{}/api/pair/info".format(int(port)),
                          timeout=_PROBE_FALLBACK_TIMEOUT) as resp:
-            return 200 <= int(getattr(resp, "status", 200) or 200) < 500
+            if not (200 <= int(getattr(resp, "status", 200) or 200) < 500):
+                return False
+            # 盲审 B（major）：与下面的网络兜底路径（校验 payload 的 app）对齐 ——
+            # 只看状态码会把"任何本机 HTTP 服务"当成助手，误报"已有实例"。
+            import json as _json
+
+            try:
+                payload = _json.loads(resp.read().decode("utf-8", "replace") or "{}")
+            except Exception:                                # noqa: BLE001
+                return False
+            return isinstance(payload, dict) and payload.get("app") == "easysub-helper"
     except Exception:                                        # noqa: BLE001 - 探不通就是陈旧锁
         return False
 
@@ -217,6 +230,10 @@ def _gui_failure_notice(server, pairing):
         code = None
     path = os.path.join(config.data_dir(), "last-run.txt")
     text = t("cli.guiFallbackNotice", port=port, code=code or "?", path=path)
+    # 盲审 A（major）：这条通道公布的码**不能被 60 秒旋转作废** —— 窗口化产物里旋转日志
+    # 同样进了 devnull，用户拿到的是已死的码，还会因输错 5 次被锁 300 秒。
+    global _SKIP_CODE_ROTATION
+    _SKIP_CODE_ROTATION = True
     try:
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(text + "\n")
@@ -261,7 +278,15 @@ def _find_running_helper(preferred_port=None, fast=False):
         # isinstance 会掉进下面拿 `int(True)=1` 去探活的坑，于"端口未知的锁"被误判成陈旧锁
         # → 放行第二个实例（两套配对码共写 pairing.json，正是单实例锁存在的全部理由）。
         if known is True:
-            return True
+            # 盲审 B（major）：port 未知的锁以前**直接当真**（无法证伪）—— pid 被复用/僵尸时
+            # 用户被永久拦在"已经有一个助手在运行（端口未知）"外面（--no-gui 直接 return 2，
+            # 文案还让他去找一个并不存在的窗口）。这里用兜底探测证伪：默认端口段里真有助手
+            # 应答（校验 app）才认，否则按陈旧锁继续启动。
+            for candidate in range(config.DEFAULT_PORT, config.DEFAULT_PORT + 3):
+                if _probe_helper_port(candidate):
+                    return candidate
+            logging.getLogger("easysub-helper").warning(t("cli.warn.staleLock", port="?"))
+            return None
         if not isinstance(known, int):
             return True
         # 盲审 S2（major）：**端口才是事实**。锁里的 pid 可能已被复用（Windows pid 复用很快）
@@ -386,7 +411,7 @@ async def _serve(server, pairing):
 
     rotator = None
     if pairing is not None:
-        rotator = asyncio.ensure_future(_rotate_pair_code(pairing))
+        rotator = None if _SKIP_CODE_ROTATION else asyncio.ensure_future(_rotate_pair_code(pairing))
 
     loop = asyncio.get_event_loop()
     stop = asyncio.Event()
