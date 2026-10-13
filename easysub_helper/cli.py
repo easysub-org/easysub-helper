@@ -188,6 +188,9 @@ def _probe_helper_port(port):
     """
     import urllib.request as _url
 
+    # 坑（盲审 S1）：`True` 是 `int` 的子类 —— 绝不能把它当端口（`int(True)=1`）。
+    if port is True or isinstance(port, bool) or not isinstance(port, int):
+        return False
     try:
         opener = _url.build_opener(_url.ProxyHandler({}))   # 别让 http_proxy 把本机探测代理走
         with opener.open("http://127.0.0.1:{}/api/pair/info".format(int(port)),
@@ -210,7 +213,12 @@ def _find_running_helper(preferred_port=None, fast=False):
     """
     known = instance.read()
     if known:
-        # 端口未知时 instance.read() 返回 True —— 让调用方照样能提示"已有实例"
+        # 端口未知时 instance.read() 返回 True —— 让调用方照样能提示"已有实例"。
+        # 坑（盲审 S1，major）：**bool 是 int 的子类**，`isinstance(True, int)` 为真 —— 只判
+        # isinstance 会掉进下面拿 `int(True)=1` 去探活的坑，于"端口未知的锁"被误判成陈旧锁
+        # → 放行第二个实例（两套配对码共写 pairing.json，正是单实例锁存在的全部理由）。
+        if known is True:
+            return True
         if not isinstance(known, int):
             return True
         # 盲审 S2（major）：**端口才是事实**。锁里的 pid 可能已被复用（Windows pid 复用很快）
@@ -440,7 +448,7 @@ def main(argv=None):
     running = _find_running_helper(args.port, fast=not has_gui)
     # 坑（复核 L）：锁文件刚被 claim()、还没 update() 时端口是"未知"（read() 返回 True），
     # 直接插进文案会变成「已经有一个助手在运行（端口 True）」。用一句人话代替。
-    port_text = running if isinstance(running, int) else t("cli.portUnknown")
+    port_text = running if (running is not True and isinstance(running, int)) else t("cli.portUnknown")
     if running:
         if args.allow_multi:
             _eprint(t("cli.warn.multiInstance", port=port_text))
@@ -457,6 +465,13 @@ def main(argv=None):
                 return 2
             logging.getLogger("easysub-helper").warning(
                 t("cli.warn.multiInstance", port=port_text))
+
+    # 盲审 S2（major，竞态）：**立刻占位**。锁只在 `HelperServer.start()` 里写，而 GUI 路径下
+    # start() 要等窗口建好才由服务线程调用（onefile 解包 + import + Tk 建窗可达数秒）——
+    # 这段"已启动但锁还不存在"的窗口里，第二次双击会看不到任何实例而直接起第二个
+    # （两套配对码共写 pairing.json）。这里在"检查已通过"之后马上写占位锁，把窗口缩到最小；
+    # claim() 遇到别人活着的锁不会覆盖（`--allow-multi` 因此不受影响），真实端口稍后由 start() 补。
+    instance.claim(None)
 
     from . import gui
 
