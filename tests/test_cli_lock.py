@@ -58,18 +58,31 @@ class FindRunningHelperTest(unittest.TestCase):
         with mock.patch.object(instance, "pid_alive", return_value=True), \
              mock.patch.object(cli, "_probe_helper_port", return_value=True):
             self.assertEqual(cli._find_running_helper(), 9000)
-        # 陈旧锁（端口没人监听）→ 不再拦启动
+        # 盲审第 7 轮：**探不到 ≠ 不存在**。锁是刚写的（新鲜）→ 仍当活实例，
+        # 否则"第 1 个实例已 claim 但还没 bind"的窗口里会放行第二个实例。
+        with mock.patch.object(instance, "pid_alive", return_value=True), \
+             mock.patch.object(cli, "_probe_helper_port", return_value=False):
+            self.assertEqual(cli._find_running_helper(), 9000)
+        # 只有"锁已经够旧"（不像是在启动中）才允许按陈旧锁放行
+        old = os.stat(path).st_mtime - cli._STALE_LOCK_GRACE_SEC - 60
+        os.utime(path, (old, old))
         with mock.patch.object(instance, "pid_alive", return_value=True), \
              mock.patch.object(cli, "_probe_helper_port", return_value=False):
             self.assertIsNone(cli._find_running_helper())
 
 
     def test_stale_lock_with_reused_pid_does_not_block_startup(self):
-        """pid 复用/僵尸导致的假"已有实例"必须被端口探活识破（否则 --no-gui 直接 return 2）。"""
+        """pid 复用/僵尸导致的假"已有实例"必须被识破（否则 --no-gui 直接 return 2）。
+
+        判据是"探不到 **且锁够旧**"：新鲜锁代表可能在启动中，那种情况下必须拦住（否则会起第二个
+        实例共写 pairing.json）；只有旧锁才允许按陈旧放行。
+        """
         path = instance.lock_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write('{"pid": %d, "port": 9001}' % (os.getpid() + 1))
+        old = os.stat(path).st_mtime - cli._STALE_LOCK_GRACE_SEC - 60
+        os.utime(path, (old, old))
         with mock.patch.object(instance, "pid_alive", return_value=True), \
              mock.patch.object(cli, "_probe_helper_port", return_value=False):
             self.assertIsNone(cli._find_running_helper())
